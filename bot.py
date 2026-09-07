@@ -1,8 +1,6 @@
-
 import os
 import re
 import math
-import json
 import requests
 
 from telegram import Update
@@ -12,7 +10,12 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": (
+        "Mozilla/5.0 (Linux; Android 10; Mobile) "
+        "AppleWebKit/537.36 Chrome/120 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8"
 }
 
 
@@ -27,7 +30,14 @@ def calculate_price(price):
 
 
 def get_product_id(url):
-    match = re.search(r"/([A-Z0-9]{12})(?:[/?]|$)", url.upper())
+    url = url.split("?")[0].rstrip("/")
+
+    match = re.search(r"/([A-Z0-9]{12})$", url.upper())
+
+    if match:
+        return match.group(1)
+
+    match = re.search(r"/([A-Z0-9]{12})(?:/|$)", url.upper())
 
     if match:
         return match.group(1)
@@ -35,77 +45,76 @@ def get_product_id(url):
     return None
 
 
-def find_price(data):
-    if isinstance(data, dict):
-        # البحث عن السعر الحالي أولاً
-        for key in [
-            "Price",
-            "price",
-            "CurrentPrice",
-            "currentPrice",
-            "SalePrice",
-            "salePrice"
-        ]:
-            value = data.get(key)
+def to_float(value):
+    if value is None:
+        return None
 
-            if isinstance(value, (int, float)):
-                return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
 
-            if isinstance(value, str):
-                cleaned = value.replace("₺", "").replace("TL", "").strip()
-                cleaned = cleaned.replace(".", "").replace(",", ".")
+    if isinstance(value, str):
+        value = value.strip()
 
-                try:
-                    return float(cleaned)
-                except:
-                    pass
+        value = (
+            value.replace("₺", "")
+            .replace("TL", "")
+            .replace("TRY", "")
+            .strip()
+        )
 
-        for value in data.values():
-            result = find_price(value)
+        if "," in value and "." in value:
+            value = value.replace(".", "").replace(",", ".")
+        elif "," in value:
+            value = value.replace(",", ".")
 
-            if result is not None:
-                return result
-
-    elif isinstance(data, list):
-        for item in data:
-            result = find_price(item)
-
-            if result is not None:
-                return result
+        try:
+            return float(value)
+        except ValueError:
+            return None
 
     return None
 
 
-def get_title(data):
-    if isinstance(data, dict):
+def get_price_from_market(market):
+    price_data = market.get("Price", {})
 
-        for key in [
-            "ProductTitle",
-            "productTitle",
-            "Title",
-            "title",
-            "Name",
-            "name"
-        ]:
-            value = data.get(key)
+    if not isinstance(price_data, dict):
+        return None, None, 0
 
-            if isinstance(value, str) and len(value) > 1:
-                return value
+    msrp = to_float(
+        price_data.get("MSRP")
+        or price_data.get("ListPrice")
+    )
 
-        for value in data.values():
-            result = get_title(value)
+    sale_price = to_float(
+        price_data.get("SalePrice")
+    )
 
-            if result:
-                return result
+    discount = price_data.get(
+        "DiscountPercentage",
+        0
+    )
 
-    elif isinstance(data, list):
-        for item in data:
-            result = get_title(item)
+    try:
+        discount = float(discount)
+    except:
+        discount = 0
 
-            if result:
-                return result
+    if (
+        sale_price is not None
+        and msrp is not None
+        and sale_price >= 0
+        and sale_price < msrp
+    ):
+        return sale_price, msrp, discount
 
-    return None
+    if msrp is not None:
+        return msrp, None, 0
+
+    if sale_price is not None:
+        return sale_price, None, 0
+
+    return None, None, 0
 
 
 def get_xbox_game(url):
@@ -113,20 +122,24 @@ def get_xbox_game(url):
     product_id = get_product_id(url)
 
     if not product_id:
-        raise Exception("ماكدر أطلع ID اللعبة من الرابط")
+        raise Exception(
+            "ماكدر أطلع ID اللعبة من الرابط"
+        )
 
-    api_url = (
-        "https://displaycatalog.mp.microsoft.com/v7.0/products"
-        f"?bigIds={product_id}"
-        "&market=TR"
-        "&languages=tr-tr"
-        "&MS-CV=DGU1mcuYo0WMMp"
-    )
+    api_url = "https://displaycatalog.mp.microsoft.com/v7.0/products"
+
+    params = {
+        "bigIds": product_id,
+        "market": "TR",
+        "languages": "tr-TR",
+        "fieldsTemplate": "details"
+    }
 
     response = requests.get(
         api_url,
+        params=params,
         headers=HEADERS,
-        timeout=20
+        timeout=30
     )
 
     response.raise_for_status()
@@ -136,68 +149,84 @@ def get_xbox_game(url):
     products = data.get("Products", [])
 
     if not products:
-        raise Exception("اللعبة غير موجودة")
+        raise Exception(
+            "اللعبة غير موجودة في Xbox Catalog"
+        )
 
     product = products[0]
 
-    title = (
-        product.get("LocalizedProperties", [{}])[0]
-        .get("ProductTitle")
+    title = None
+
+    localized = product.get(
+        "LocalizedProperties",
+        []
     )
+
+    if localized:
+        for item in localized:
+            title = item.get("ProductTitle")
+
+            if title:
+                break
+
+    if not title:
+        title = product.get("ProductTitle")
+
+    if not title:
+        title = "لعبة Xbox"
 
     price = None
     original_price = None
     discount = 0
 
-    market_properties = product.get("MarketProperties", [])
+    market_properties = product.get(
+        "MarketProperties",
+        []
+    )
 
-    if market_properties:
+    for market in market_properties:
 
-        market = market_properties[0]
-
-        price_data = market.get("Price", {})
-
-        current_price = price_data.get("MSRP")
+        current_price, original, current_discount = (
+            get_price_from_market(market)
+        )
 
         if current_price is not None:
-            price = float(current_price)
-
-        sale_price = price_data.get("SalePrice")
-
-        if sale_price is not None:
-            sale_price = float(sale_price)
-
-            if sale_price > 0 and sale_price < price:
-                original_price = price
-                price = sale_price
-
-                discount = price_data.get(
-                    "DiscountPercentage",
-                    0
-                )
+            price = current_price
+            original_price = original
+            discount = current_discount
+            break
 
     if price is None:
-        raise Exception("ماكدر أطلع سعر اللعبة")
+        raise Exception(
+            f"ماكدر أطلع سعر اللعبة. Product ID: {product_id}"
+        )
 
     return title, price, original_price, discount
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
         "🎮 SA STORE Price Bot 🇹🇷\n\n"
-        "دزلي رابط أي لعبة من Xbox التركي."
+        "دزلي رابط أي لعبة من Xbox Store التركي "
+        "وأحسبلك سعرها الحالي تلقائياً."
     )
 
 
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_link(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     url = update.message.text.strip()
 
     if "xbox.com" not in url.lower():
 
         await update.message.reply_text(
-            "❌ دزلي رابط لعبة من Xbox Store."
+            "❌ دزلي رابط لعبة صحيح من Xbox Store."
         )
 
         return
@@ -208,34 +237,42 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        game_name, try_price, original_price, discount = get_xbox_game(url)
+        game_name, try_price, original_price, discount = (
+            get_xbox_game(url)
+        )
 
         iq_price = calculate_price(try_price)
 
         text = (
-            f"🎮 {game_name}\n\n"
+            f"🎮 اسم اللعبة:\n{game_name}\n\n"
             f"🇹🇷 السعر الحالي: ₺{try_price:.2f}\n"
         )
 
-        if original_price:
+        if original_price is not None:
+
             text += (
                 f"🏷️ السعر الأصلي: ₺{original_price:.2f}\n"
-                f"🔥 التخفيض: %{discount}\n"
             )
 
+            if discount > 0:
+                text += (
+                    f"🔥 التخفيض: %{discount:.0f}\n"
+                )
+
         text += (
-            f"\n💰 سعر SA STORE: {iq_price:,} دينار عراقي"
+            f"\n💰 سعر SA STORE: "
+            f"{iq_price:,} دينار عراقي"
         )
 
         await message.edit_text(text)
 
     except Exception as e:
 
-        print("ERROR:", e)
+        print("ERROR:", str(e))
 
         await message.edit_text(
-            "❌ صار خطأ أثناء جلب معلومات اللعبة.\n"
-            "تأكد من أن الرابط رابط لعبة صحيح من Xbox Store."
+            "❌ صار خطأ أثناء جلب معلومات اللعبة.\n\n"
+            "تأكد من أن الرابط رابط منتج صحيح من Xbox Store."
         )
 
 
@@ -246,7 +283,11 @@ def main():
             "BOT_TOKEN غير موجود في Environment Variables"
         )
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
     app.add_handler(
         CommandHandler("start", start)
