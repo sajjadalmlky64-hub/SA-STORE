@@ -27,39 +27,52 @@ HEADERS = {
 }
 
 
-PROFIT_IQD = 3000
-
-
-def get_exchange_rate():
-
-    url = "https://api.frankfurter.dev/v2/rate/TRY/IQD"
-
-    response = requests.get(
-        url,
-        timeout=20
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    rate = data.get("rate")
-
-    if rate is None:
-        raise Exception("ماكدر أجيب سعر صرف الليرة التركية")
-
-    return float(rate)
-
-
 def calculate_price(price):
 
-    exchange_rate = get_exchange_rate()
+    if price <= 25:
+        return 3000
 
-    game_price_iqd = price * exchange_rate
+    elif price <= 50:
+        return 4000
 
-    final_price = game_price_iqd + PROFIT_IQD
+    elif price <= 100:
+        return 6000
 
-    return math.ceil(final_price / 1000) * 1000
+    elif price <= 150:
+        return 8000
+
+    elif price <= 200:
+        return 10000
+
+    elif price <= 300:
+        return 13000
+
+    elif price <= 400:
+        return 15000
+
+    elif price <= 500:
+        return 18000
+
+    elif price <= 550:
+        return 20000
+
+    elif price <= 650:
+        return 23000
+
+    elif price <= 750:
+        return 26000
+
+    elif price <= 850:
+        return 29000
+
+    elif price <= 1000:
+        return 33000
+
+    else:
+        extra = price - 1000
+        extra_steps = math.ceil(extra / 100)
+
+        return 33000 + (extra_steps * 3000)
 
 
 def get_product_id(url):
@@ -97,11 +110,13 @@ def to_float(value):
 
         if "," in value and "." in value:
             value = value.replace(".", "").replace(",", ".")
+
         elif "," in value:
             value = value.replace(",", ".")
 
         try:
             return float(value)
+
         except ValueError:
             return None
 
@@ -139,65 +154,49 @@ def parse_price_object(price_data):
     original = None
     discount = 0
 
+    sale_price = to_float(
+        price_data.get("SalePrice")
+    )
+
+    msrp = to_float(
+        price_data.get("MSRP")
+        or price_data.get("ListPrice")
+        or price_data.get("BasePrice")
+        or price_data.get("OriginalPrice")
+    )
+
+    if (
+        sale_price is not None
+        and msrp is not None
+        and sale_price < msrp
+    ):
+
+        discount = (
+            (msrp - sale_price)
+            / msrp
+        ) * 100
+
+        return sale_price, msrp, discount
+
     for key in [
-        "SalePrice",
         "Price",
         "RetailPrice",
         "FormattedPrice"
     ]:
 
-        value = to_float(price_data.get(key))
+        value = to_float(
+            price_data.get(key)
+        )
 
         if value is not None:
+
             current = value
             break
 
-    for key in [
-        "MSRP",
-        "ListPrice",
-        "BasePrice",
-        "OriginalPrice"
-    ]:
+    if current is None and msrp is not None:
+        current = msrp
 
-        value = to_float(price_data.get(key))
-
-        if value is not None:
-            original = value
-            break
-
-    value = price_data.get(
-        "DiscountPercentage"
-    )
-
-    if value is not None:
-
-        try:
-            discount = float(value)
-        except:
-            discount = 0
-
-    if (
-        current is not None
-        and original is not None
-        and current < original
-    ):
-
-        if discount == 0:
-
-            discount = (
-                (original - current)
-                / original
-            ) * 100
-
-        return current, original, discount
-
-    if current is None and original is not None:
-        return original, None, 0
-
-    if current is not None:
-        return current, original, discount
-
-    return None, None, 0
+    return current, None, 0
 
 
 def find_prices(data):
@@ -209,7 +208,9 @@ def find_prices(data):
         if "Price" in data:
 
             price, original, discount = (
-                parse_price_object(data["Price"])
+                parse_price_object(
+                    data["Price"]
+                )
             )
 
             if price is not None:
@@ -221,20 +222,6 @@ def find_prices(data):
                         discount
                     )
                 )
-
-        price, original, discount = (
-            parse_price_object(data)
-        )
-
-        if price is not None:
-
-            found_prices.append(
-                (
-                    price,
-                    original,
-                    discount
-                )
-            )
 
         for value in data.values():
 
@@ -274,15 +261,25 @@ def choose_price(prices):
         return None, None, 0
 
     discounted = [
+
         item for item in valid
+
         if item[1] is not None
         and item[0] < item[1]
+
     ]
 
     if discounted:
-        return discounted[0]
 
-    return valid[0]
+        return min(
+            discounted,
+            key=lambda x: x[0]
+        )
+
+    return min(
+        valid,
+        key=lambda x: x[0]
+    )
 
 
 def fetch_product(product_id):
@@ -310,15 +307,20 @@ def fetch_product(product_id):
     data = response.json()
 
     if "Product" in data:
+
         return data["Product"]
 
-    products = data.get("Products", [])
+    products = data.get(
+        "Products",
+        []
+    )
 
     if products:
+
         return products[0]
 
     raise Exception(
-        "ما تم العثور على المنتج في Xbox Catalog"
+        "ما تم العثور على اللعبة في Xbox Catalog"
     )
 
 
@@ -383,11 +385,9 @@ async def handle_link(
 
         return
 
-
     message = await update.message.reply_text(
         "🔎 جاري فحص اللعبة والسعر..."
     )
-
 
     try:
 
@@ -398,13 +398,9 @@ async def handle_link(
             discount
         ) = get_xbox_game(url)
 
-
-        exchange_rate = get_exchange_rate()
-
         iq_price = calculate_price(
             try_price
         )
-
 
         text = (
             f"🎮 اسم اللعبة:\n"
@@ -413,14 +409,12 @@ async def handle_link(
             f"₺{try_price:,.2f}\n"
         )
 
-
         if original_price is not None:
 
             text += (
                 f"🏷️ السعر الأصلي: "
                 f"₺{original_price:,.2f}\n"
             )
-
 
             if discount > 0:
 
@@ -429,26 +423,13 @@ async def handle_link(
                     f"%{discount:.0f}\n"
                 )
 
-
-        text += (
-            f"\n💱 سعر الصرف: "
-            f"1₺ = {exchange_rate:,.2f} د.ع\n"
-        )
-
-        text += (
-            f"➕ ربح SA STORE: "
-            f"{PROFIT_IQD:,} د.ع\n"
-        )
-
         text += (
             f"\n━━━━━━━━━━━━━━\n\n"
             f"💰 سعر SA STORE: "
             f"{iq_price:,} دينار عراقي"
         )
 
-
         await message.edit_text(text)
-
 
     except Exception as e:
 
@@ -468,13 +449,11 @@ def main():
             "في Environment Variables"
         )
 
-
     app = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
-
 
     app.add_handler(
         CommandHandler(
@@ -483,7 +462,6 @@ def main():
         )
     )
 
-
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -491,11 +469,9 @@ def main():
         )
     )
 
-
     print(
         "SA STORE Bot is running..."
     )
-
 
     app.run_polling()
 
