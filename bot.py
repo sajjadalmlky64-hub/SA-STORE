@@ -4,7 +4,13 @@ import math
 import requests
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -20,6 +26,7 @@ HEADERS = {
 
 
 def calculate_price(price):
+
     if price <= 25:
         return 3000
 
@@ -30,14 +37,11 @@ def calculate_price(price):
 
 
 def get_product_id(url):
-    url = url.split("?")[0].rstrip("/")
 
-    match = re.search(r"/([A-Z0-9]{12})$", url.upper())
-
-    if match:
-        return match.group(1)
-
-    match = re.search(r"/([A-Z0-9]{12})(?:/|$)", url.upper())
+    match = re.search(
+        r"/([A-Z0-9]{12})(?:[/?]|$)",
+        url.upper()
+    )
 
     if match:
         return match.group(1)
@@ -46,6 +50,7 @@ def get_product_id(url):
 
 
 def to_float(value):
+
     if value is None:
         return None
 
@@ -53,7 +58,6 @@ def to_float(value):
         return float(value)
 
     if isinstance(value, str):
-        value = value.strip()
 
         value = (
             value.replace("₺", "")
@@ -64,57 +68,115 @@ def to_float(value):
 
         if "," in value and "." in value:
             value = value.replace(".", "").replace(",", ".")
+
         elif "," in value:
             value = value.replace(",", ".")
 
         try:
             return float(value)
+
         except ValueError:
             return None
 
     return None
 
 
-def get_price_from_market(market):
-    price_data = market.get("Price", {})
+def get_game_price(product):
 
-    if not isinstance(price_data, dict):
-        return None, None, 0
+    prices = []
 
-    msrp = to_float(
-        price_data.get("MSRP")
-        or price_data.get("ListPrice")
+    sku_availabilities = product.get(
+        "DisplaySkuAvailabilities",
+        []
     )
 
-    sale_price = to_float(
-        price_data.get("SalePrice")
+    for sku_data in sku_availabilities:
+
+        availabilities = sku_data.get(
+            "Availabilities",
+            []
+        )
+
+        for availability in availabilities:
+
+            actions = availability.get(
+                "Actions",
+                []
+            )
+
+            if actions and "Purchase" not in actions:
+                continue
+
+            order_data = availability.get(
+                "OrderManagementData",
+                {}
+            )
+
+            price_data = order_data.get(
+                "Price",
+                {}
+            )
+
+            if not isinstance(price_data, dict):
+                continue
+
+            currency = price_data.get(
+                "CurrencyCode",
+                ""
+            )
+
+            if currency and currency != "TRY":
+                continue
+
+            list_price = to_float(
+                price_data.get("ListPrice")
+            )
+
+            msrp = to_float(
+                price_data.get("MSRP")
+            )
+
+            if list_price is None:
+                continue
+
+            prices.append({
+                "current": list_price,
+                "original": msrp
+            })
+
+    if not prices:
+        raise Exception(
+            "ماكدر ألقى سعر اللعبة داخل بيانات Xbox"
+        )
+
+    prices.sort(
+        key=lambda x: x["current"]
     )
 
-    discount = price_data.get(
-        "DiscountPercentage",
-        0
-    )
+    selected = prices[0]
 
-    try:
-        discount = float(discount)
-    except:
-        discount = 0
+    current_price = selected["current"]
+    original_price = selected["original"]
+
+    discount = 0
 
     if (
-        sale_price is not None
-        and msrp is not None
-        and sale_price >= 0
-        and sale_price < msrp
+        original_price is not None
+        and original_price > current_price
+        and original_price > 0
     ):
-        return sale_price, msrp, discount
+        discount = round(
+            ((original_price - current_price)
+             / original_price) * 100
+        )
+    else:
+        original_price = None
 
-    if msrp is not None:
-        return msrp, None, 0
-
-    if sale_price is not None:
-        return sale_price, None, 0
-
-    return None, None, 0
+    return (
+        current_price,
+        original_price,
+        discount
+    )
 
 
 def get_xbox_game(url):
@@ -126,13 +188,17 @@ def get_xbox_game(url):
             "ماكدر أطلع ID اللعبة من الرابط"
         )
 
-    api_url = "https://displaycatalog.mp.microsoft.com/v7.0/products"
+    api_url = (
+        "https://displaycatalog.mp.microsoft.com"
+        "/v7.0/products"
+    )
 
     params = {
         "bigIds": product_id,
         "market": "TR",
         "languages": "tr-TR",
-        "fieldsTemplate": "details"
+        "fieldsTemplate": "Details",
+        "actionFilter": "Browse"
     }
 
     response = requests.get(
@@ -146,7 +212,10 @@ def get_xbox_game(url):
 
     data = response.json()
 
-    products = data.get("Products", [])
+    products = data.get(
+        "Products",
+        []
+    )
 
     if not products:
         raise Exception(
@@ -162,46 +231,33 @@ def get_xbox_game(url):
         []
     )
 
-    if localized:
-        for item in localized:
-            title = item.get("ProductTitle")
+    for item in localized:
 
-            if title:
-                break
+        title = item.get(
+            "ProductTitle"
+        )
+
+        if title:
+            break
 
     if not title:
-        title = product.get("ProductTitle")
+        title = product.get(
+            "ProductTitle"
+        )
 
     if not title:
         title = "لعبة Xbox"
 
-    price = None
-    original_price = None
-    discount = 0
-
-    market_properties = product.get(
-        "MarketProperties",
-        []
+    price, original_price, discount = (
+        get_game_price(product)
     )
 
-    for market in market_properties:
-
-        current_price, original, current_discount = (
-            get_price_from_market(market)
-        )
-
-        if current_price is not None:
-            price = current_price
-            original_price = original
-            discount = current_discount
-            break
-
-    if price is None:
-        raise Exception(
-            f"ماكدر أطلع سعر اللعبة. Product ID: {product_id}"
-        )
-
-    return title, price, original_price, discount
+    return (
+        title,
+        price,
+        original_price,
+        discount
+    )
 
 
 async def start(
@@ -237,26 +293,36 @@ async def handle_link(
 
     try:
 
-        game_name, try_price, original_price, discount = (
-            get_xbox_game(url)
+        (
+            game_name,
+            try_price,
+            original_price,
+            discount
+        ) = get_xbox_game(url)
+
+        iq_price = calculate_price(
+            try_price
         )
 
-        iq_price = calculate_price(try_price)
-
         text = (
-            f"🎮 اسم اللعبة:\n{game_name}\n\n"
-            f"🇹🇷 السعر الحالي: ₺{try_price:.2f}\n"
+            f"🎮 اسم اللعبة:\n"
+            f"{game_name}\n\n"
+            f"🇹🇷 السعر الحالي: "
+            f"₺{try_price:.2f}\n"
         )
 
         if original_price is not None:
 
             text += (
-                f"🏷️ السعر الأصلي: ₺{original_price:.2f}\n"
+                f"🏷️ السعر الأصلي: "
+                f"₺{original_price:.2f}\n"
             )
 
             if discount > 0:
+
                 text += (
-                    f"🔥 التخفيض: %{discount:.0f}\n"
+                    f"🔥 التخفيض: "
+                    f"%{discount}\n"
                 )
 
         text += (
@@ -279,8 +345,10 @@ async def handle_link(
 def main():
 
     if not BOT_TOKEN:
+
         raise ValueError(
-            "BOT_TOKEN غير موجود في Environment Variables"
+            "BOT_TOKEN غير موجود في "
+            "Environment Variables"
         )
 
     app = (
@@ -290,7 +358,10 @@ def main():
     )
 
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     app.add_handler(
@@ -300,10 +371,15 @@ def main():
         )
     )
 
-    print("SA STORE Bot is running...")
+    print(
+        "SA STORE Bot is running..."
+    )
 
-    app.run_polling()
+    app.run_polling(
+        drop_pending_updates=True
+    )
 
 
 if __name__ == "__main__":
     main()
+```0
