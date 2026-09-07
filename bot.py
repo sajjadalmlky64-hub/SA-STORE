@@ -1,8 +1,9 @@
 import os
 import re
 import math
+import json
 import requests
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote
 
 from bs4 import BeautifulSoup
 
@@ -25,65 +26,45 @@ HEADERS = {
         "AppleWebKit/537.36 "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-
-# ==========================================
-# حساب سعر SA STORE
-# ==========================================
 
 def calculate_price(price):
 
     if price <= 25:
         return 3000
-
     elif price <= 50:
         return 4000
-
     elif price <= 100:
         return 6000
-
     elif price <= 150:
         return 8000
-
     elif price <= 200:
         return 10000
-
     elif price <= 300:
         return 13000
-
     elif price <= 400:
         return 15000
-
     elif price <= 500:
         return 18000
-
     elif price <= 550:
         return 20000
-
     elif price <= 650:
         return 23000
-
     elif price <= 750:
         return 26000
-
     elif price <= 850:
         return 29000
-
     elif price <= 1000:
         return 33000
 
-    else:
-        extra = price - 1000
-        extra_steps = math.ceil(extra / 100)
+    extra = price - 1000
+    extra_steps = math.ceil(extra / 100)
 
-        return 33000 + (extra_steps * 3000)
+    return 33000 + (extra_steps * 3000)
 
-
-# ==========================================
-# استخراج Product ID من رابط Xbox
-# ==========================================
 
 def get_product_id(url):
 
@@ -100,10 +81,6 @@ def get_product_id(url):
     return None
 
 
-# ==========================================
-# تحويل السعر إلى رقم
-# ==========================================
-
 def to_float(value):
 
     if value is None:
@@ -119,21 +96,25 @@ def to_float(value):
             .replace("TL", "")
             .replace("TRY", "")
             .replace("\xa0", "")
+            .replace(" ", "")
             .strip()
         )
 
         if "," in value and "." in value:
 
-            # 1.999,00
             if value.rfind(",") > value.rfind("."):
                 value = value.replace(".", "").replace(",", ".")
-
-            # 1,999.00
             else:
                 value = value.replace(",", "")
 
         elif "," in value:
-            value = value.replace(",", ".")
+
+            parts = value.split(",")
+
+            if len(parts[-1]) == 3:
+                value = value.replace(",", "")
+            else:
+                value = value.replace(",", ".")
 
         try:
             return float(value)
@@ -144,11 +125,6 @@ def to_float(value):
     return None
 
 
-# ==========================================
-# جلب معلومات اللعبة من Microsoft
-# فقط للحصول على الاسم
-# ==========================================
-
 def fetch_xbox_product(product_id):
 
     api_url = (
@@ -158,7 +134,7 @@ def fetch_xbox_product(product_id):
 
     params = {
         "market": "TR",
-        "languages": "tr-TR,en-US",
+        "languages": "en-US,tr-TR",
         "fieldsTemplate": "Details"
     }
 
@@ -181,9 +157,7 @@ def fetch_xbox_product(product_id):
     if products:
         return products[0]
 
-    raise Exception(
-        "ما تم العثور على اللعبة"
-    )
+    raise Exception("ما تم العثور على اللعبة في Xbox")
 
 
 def get_game_title(product):
@@ -195,7 +169,23 @@ def get_game_title(product):
 
     for item in localized:
 
-        title = item.get("ProductTitle")
+        language = item.get(
+            "Language",
+            ""
+        )
+
+        title = item.get(
+            "ProductTitle"
+        )
+
+        if title and "en" in language.lower():
+            return title
+
+    for item in localized:
+
+        title = item.get(
+            "ProductTitle"
+        )
 
         if title:
             return title
@@ -208,16 +198,19 @@ def get_game_title(product):
     return None
 
 
-# ==========================================
-# البحث عن اللعبة في XB Deals
-# ==========================================
-
 def normalize_text(text):
+
+    if not text:
+        return ""
 
     text = text.lower()
 
+    text = text.replace("™", "")
+    text = text.replace("®", "")
+    text = text.replace("©", "")
+
     text = re.sub(
-        r"[™®©:,\-–—!?.'\"()\[\]]",
+        r"[^a-z0-9\s]",
         " ",
         text
     )
@@ -231,12 +224,31 @@ def normalize_text(text):
     return text.strip()
 
 
-def search_xbdeals(game_name):
+def similarity_score(name1, name2):
 
-    # البحث عبر DuckDuckGo عن صفحة اللعبة داخل XBDeals
+    a = set(
+        normalize_text(name1).split()
+    )
+
+    b = set(
+        normalize_text(name2).split()
+    )
+
+    if not a or not b:
+        return 0
+
+    common = len(a & b)
+
+    return common / max(
+        len(a),
+        len(b)
+    )
+
+
+def search_duckduckgo(game_name):
+
     query = (
-        f"site:xbdeals.net/tr-store/game "
-        f"\"{game_name}\""
+        f'site:xbdeals.net/tr-store/game/ "{game_name}"'
     )
 
     url = (
@@ -257,54 +269,158 @@ def search_xbdeals(game_name):
         "html.parser"
     )
 
-    links = []
+    results = []
 
-    for a in soup.select(".result__a"):
+    for a in soup.select("a.result__a"):
 
         href = a.get("href", "")
-
         title = a.get_text(
             " ",
             strip=True
         )
 
+        href = unquote(href)
+
+        if "uddg=" in href:
+
+            match = re.search(
+                r"uddg=([^&]+)",
+                href
+            )
+
+            if match:
+                href = unquote(
+                    match.group(1)
+                )
+
         if "xbdeals.net/tr-store/game/" in href:
-            links.append(
+
+            results.append(
                 (
                     title,
                     href
                 )
             )
 
-    if not links:
+    return results
+
+
+def search_bing(game_name):
+
+    query = quote_plus(
+        f'site:xbdeals.net/tr-store/game/ "{game_name}"'
+    )
+
+    url = (
+        f"https://www.bing.com/search?q={query}"
+    )
+
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser"
+    )
+
+    results = []
+
+    for a in soup.select("li.b_algo h2 a"):
+
+        href = a.get("href", "")
+        title = a.get_text(
+            " ",
+            strip=True
+        )
+
+        if "xbdeals.net/tr-store/game/" in href:
+
+            results.append(
+                (
+                    title,
+                    href
+                )
+            )
+
+    return results
+
+
+def choose_best_result(game_name, results):
+
+    if not results:
         return None
 
     target = normalize_text(game_name)
 
-    # نحاول اختيار أقرب اسم
-    for title, href in links:
+    best_url = None
+    best_score = -1
 
-        normalized_title = normalize_text(title)
+    for title, url in results:
 
-        if target in normalized_title:
-            return href
+        title_normalized = normalize_text(title)
 
-    return links[0][1]
+        score = similarity_score(
+            target,
+            title_normalized
+        )
+
+        if target in title_normalized:
+            score += 2
+
+        if score > best_score:
+
+            best_score = score
+            best_url = url
+
+    return best_url
 
 
-# ==========================================
-# قراءة السعر من صفحة XB Deals
-# ==========================================
+def search_xbdeals(game_name):
+
+    results = []
+
+    try:
+        results.extend(
+            search_duckduckgo(game_name)
+        )
+
+    except Exception as e:
+        print("DuckDuckGo Error:", repr(e))
+
+    if not results:
+
+        try:
+            results.extend(
+                search_bing(game_name)
+            )
+
+        except Exception as e:
+            print("Bing Error:", repr(e))
+
+    return choose_best_result(
+        game_name,
+        results
+    )
+
 
 def get_xbdeals_price(game_name):
 
-    game_url = search_xbdeals(game_name)
+    game_url = search_xbdeals(
+        game_name
+    )
 
     if not game_url:
 
         raise Exception(
             "ماكدر ألقى اللعبة في XB Deals"
         )
+
+    print("XBDEALS URL:", game_url)
 
     response = requests.get(
         game_url,
@@ -319,25 +435,72 @@ def get_xbdeals_price(game_name):
         "html.parser"
     )
 
+    for script in soup.find_all(
+        "script",
+        type="application/ld+json"
+    ):
+
+        try:
+
+            if not script.string:
+                continue
+
+            data = json.loads(
+                script.string
+            )
+
+            items = (
+                data
+                if isinstance(data, list)
+                else [data]
+            )
+
+            for item in items:
+
+                if not isinstance(item, dict):
+                    continue
+
+                offers = item.get("offers")
+
+                if isinstance(offers, dict):
+
+                    price = to_float(
+                        offers.get("price")
+                    )
+
+                    currency = offers.get(
+                        "priceCurrency",
+                        ""
+                    )
+
+                    if (
+                        price is not None
+                        and currency in (
+                            "TRY",
+                            "TL",
+                            ""
+                        )
+                    ):
+                        return price
+
+        except Exception:
+            pass
+
     text = soup.get_text(
         " ",
         strip=True
     )
 
-    # نحذف المسافات الزائدة
     text = re.sub(
         r"\s+",
         " ",
         text
     )
 
-    # ======================================
-    # نبحث عن الأسعار التركية
-    # ======================================
-
     prices = re.findall(
-        r"([\d.,]+)\s*₺",
-        text
+        r"([\d.,]+)\s*(?:₺|TRY)",
+        text,
+        re.IGNORECASE
     )
 
     numeric_prices = []
@@ -354,7 +517,6 @@ def get_xbdeals_price(game_name):
 
     if not numeric_prices:
 
-        # حالة الألعاب المجانية
         if re.search(
             r"\bFREE\b",
             text,
@@ -363,24 +525,11 @@ def get_xbdeals_price(game_name):
             return 0.0
 
         raise Exception(
-            "ماكدر أطلع السعر من XB Deals"
+            "ماكدر أطلع السعر التركي من XB Deals"
         )
 
-    # ======================================
-    # محاولة قراءة السعر الحالي
-    #
-    # XB Deals عادة يعرض السعر الحالي
-    # قبل السعر الأصلي
-    # ======================================
+    return numeric_prices[0]
 
-    current_price = numeric_prices[0]
-
-    return current_price
-
-
-# ==========================================
-# جلب اللعبة والسعر النهائي
-# ==========================================
 
 def get_xbox_game(url):
 
@@ -410,15 +559,8 @@ def get_xbox_game(url):
         game_name
     )
 
-    return (
-        game_name,
-        try_price
-    )
+    return game_name, try_price
 
-
-# ==========================================
-# أمر Start
-# ==========================================
 
 async def start(
     update: Update,
@@ -427,20 +569,19 @@ async def start(
 
     await update.message.reply_text(
         "🎮 SA STORE Price Bot 🇹🇷\n\n"
-        "دزلي رابط لعبة من Xbox Store "
+        "دزلي رابط أي لعبة من Xbox Store "
         "وأجيبلك السعر التركي الحالي "
         "وسعر SA STORE."
     )
 
 
-# ==========================================
-# استقبال الرابط
-# ==========================================
-
 async def handle_link(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+
+    if not update.message:
+        return
 
     url = update.message.text.strip()
 
@@ -458,50 +599,53 @@ async def handle_link(
 
     try:
 
-        game_name, try_price = (
-            get_xbox_game(url)
+        game_name, try_price = get_xbox_game(
+            url
         )
 
         iq_price = calculate_price(
             try_price
         )
 
-        text = (
-            f"🎮 اسم اللعبة:\n"
-            f"{game_name}\n\n"
-            f"🇹🇷 السعر الحالي: "
-            f"₺{try_price:,.2f}\n\n"
-            f"━━━━━━━━━━━━━━\n\n"
-            f"💰 سعر SA STORE: "
-            f"{iq_price:,} دينار عراقي"
-        )
+        if try_price == 0:
+
+            text = (
+                f"🎮 اسم اللعبة:\n"
+                f"{game_name}\n\n"
+                f"🇹🇷 السعر الحالي: مجاني 🆓\n\n"
+                f"━━━━━━━━━━━━━━\n\n"
+                f"💰 سعر SA STORE: مجاني 🆓"
+            )
+
+        else:
+
+            text = (
+                f"🎮 اسم اللعبة:\n"
+                f"{game_name}\n\n"
+                f"🇹🇷 السعر الحالي: "
+                f"₺{try_price:,.2f}\n\n"
+                f"━━━━━━━━━━━━━━\n\n"
+                f"💰 سعر SA STORE: "
+                f"{iq_price:,} دينار عراقي"
+            )
 
         await message.edit_text(text)
 
     except Exception as e:
 
-        print(
-            "ERROR:",
-            repr(e)
-        )
+        print("ERROR:", repr(e))
 
         await message.edit_text(
-            f"❌ صار خطأ:\n\n"
-            f"{str(e)}"
+            f"❌ صار خطأ:\n\n{str(e)}"
         )
 
-
-# ==========================================
-# تشغيل البوت
-# ==========================================
 
 def main():
 
     if not BOT_TOKEN:
 
         raise ValueError(
-            "BOT_TOKEN غير موجود "
-            "في Environment Variables"
+            "BOT_TOKEN غير موجود في Environment Variables"
         )
 
     app = (
