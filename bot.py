@@ -31,48 +31,35 @@ def calculate_price(price):
 
     if price <= 25:
         return 3000
-
     elif price <= 50:
         return 4000
-
     elif price <= 100:
         return 6000
-
     elif price <= 150:
         return 8000
-
     elif price <= 200:
         return 10000
-
     elif price <= 300:
         return 13000
-
     elif price <= 400:
         return 15000
-
     elif price <= 500:
         return 18000
-
     elif price <= 550:
         return 20000
-
     elif price <= 650:
         return 23000
-
     elif price <= 750:
         return 26000
-
     elif price <= 850:
         return 29000
-
     elif price <= 1000:
         return 33000
 
-    else:
-        extra = price - 1000
-        extra_steps = math.ceil(extra / 100)
+    extra = price - 1000
+    extra_steps = math.ceil(extra / 100)
 
-        return 33000 + (extra_steps * 3000)
+    return 33000 + (extra_steps * 3000)
 
 
 def get_product_id(url):
@@ -110,13 +97,11 @@ def to_float(value):
 
         if "," in value and "." in value:
             value = value.replace(".", "").replace(",", ".")
-
         elif "," in value:
             value = value.replace(",", ".")
 
         try:
             return float(value)
-
         except ValueError:
             return None
 
@@ -137,12 +122,83 @@ def get_title(product):
         if title:
             return title
 
-    title = product.get("ProductTitle")
+    return product.get(
+        "ProductTitle",
+        "لعبة Xbox"
+    )
 
-    if title:
-        return title
 
-    return "لعبة Xbox"
+def get_price_info(product):
+
+    market_properties = product.get(
+        "MarketProperties",
+        []
+    )
+
+    if market_properties:
+
+        for market in market_properties:
+
+            price_data = market.get(
+                "Price",
+                {}
+            )
+
+            if not isinstance(price_data, dict):
+                continue
+
+            msrp = to_float(
+                price_data.get("MSRP")
+                or price_data.get("ListPrice")
+            )
+
+            sale_price = to_float(
+                price_data.get("SalePrice")
+            )
+
+            # إذا أكو تخفيض حقيقي
+            if (
+                sale_price is not None
+                and msrp is not None
+                and sale_price < msrp
+            ):
+
+                discount = (
+                    (msrp - sale_price)
+                    / msrp
+                ) * 100
+
+                return (
+                    sale_price,
+                    msrp,
+                    discount
+                )
+
+            # السعر الحالي بدون تخفيض
+            if msrp is not None:
+
+                return (
+                    msrp,
+                    None,
+                    0
+                )
+
+            if sale_price is not None:
+
+                return (
+                    sale_price,
+                    None,
+                    0
+                )
+
+    # بحث احتياطي داخل البيانات
+    prices = find_prices(product)
+
+    if prices:
+
+        return choose_price(prices)
+
+    return None, None, 0
 
 
 def parse_price_object(price_data):
@@ -150,19 +206,21 @@ def parse_price_object(price_data):
     if not isinstance(price_data, dict):
         return None, None, 0
 
-    current = None
-    original = None
-    discount = 0
-
-    sale_price = to_float(
-        price_data.get("SalePrice")
-    )
-
     msrp = to_float(
         price_data.get("MSRP")
         or price_data.get("ListPrice")
         or price_data.get("BasePrice")
         or price_data.get("OriginalPrice")
+    )
+
+    sale_price = to_float(
+        price_data.get("SalePrice")
+        or price_data.get("DiscountPrice")
+    )
+
+    current_price = to_float(
+        price_data.get("Price")
+        or price_data.get("RetailPrice")
     )
 
     if (
@@ -178,25 +236,26 @@ def parse_price_object(price_data):
 
         return sale_price, msrp, discount
 
-    for key in [
-        "Price",
-        "RetailPrice",
-        "FormattedPrice"
-    ]:
+    if (
+        current_price is not None
+        and msrp is not None
+        and current_price < msrp
+    ):
 
-        value = to_float(
-            price_data.get(key)
-        )
+        discount = (
+            (msrp - current_price)
+            / msrp
+        ) * 100
 
-        if value is not None:
+        return current_price, msrp, discount
 
-            current = value
-            break
+    if current_price is not None:
+        return current_price, None, 0
 
-    if current is None and msrp is not None:
-        current = msrp
+    if msrp is not None:
+        return msrp, None, 0
 
-    return current, None, 0
+    return None, None, 0
 
 
 def find_prices(data):
@@ -205,23 +264,20 @@ def find_prices(data):
 
     if isinstance(data, dict):
 
-        if "Price" in data:
+        # نفحص أي كائن يحتوي معلومات سعر
+        price, original, discount = (
+            parse_price_object(data)
+        )
 
-            price, original, discount = (
-                parse_price_object(
-                    data["Price"]
+        if price is not None:
+
+            found_prices.append(
+                (
+                    price,
+                    original,
+                    discount
                 )
             )
-
-            if price is not None:
-
-                found_prices.append(
-                    (
-                        price,
-                        original,
-                        discount
-                    )
-                )
 
         for value in data.values():
 
@@ -242,31 +298,19 @@ def find_prices(data):
 
 def choose_price(prices):
 
-    valid = []
-
-    for price, original, discount in prices:
-
-        if price is None or price <= 0:
-            continue
-
-        valid.append(
-            (
-                price,
-                original,
-                discount
-            )
-        )
+    valid = [
+        item for item in prices
+        if item[0] is not None
+        and item[0] > 0
+    ]
 
     if not valid:
         return None, None, 0
 
     discounted = [
-
         item for item in valid
-
         if item[1] is not None
         and item[0] < item[1]
-
     ]
 
     if discounted:
@@ -307,7 +351,6 @@ def fetch_product(product_id):
     data = response.json()
 
     if "Product" in data:
-
         return data["Product"]
 
     products = data.get(
@@ -316,7 +359,6 @@ def fetch_product(product_id):
     )
 
     if products:
-
         return products[0]
 
     raise Exception(
@@ -329,7 +371,6 @@ def get_xbox_game(url):
     product_id = get_product_id(url)
 
     if not product_id:
-
         raise Exception(
             "ماكدر أطلع Product ID من الرابط"
         )
@@ -338,14 +379,11 @@ def get_xbox_game(url):
 
     title = get_title(product)
 
-    prices = find_prices(product)
-
     price, original_price, discount = (
-        choose_price(prices)
+        get_price_info(product)
     )
 
     if price is None:
-
         raise Exception(
             "تم العثور على اللعبة لكن ماكو سعر تركي"
         )
@@ -416,12 +454,10 @@ async def handle_link(
                 f"₺{original_price:,.2f}\n"
             )
 
-            if discount > 0:
-
-                text += (
-                    f"🔥 التخفيض: "
-                    f"%{discount:.0f}\n"
-                )
+            text += (
+                f"🔥 التخفيض: "
+                f"%{discount:.0f}\n"
+            )
 
         text += (
             f"\n━━━━━━━━━━━━━━\n\n"
