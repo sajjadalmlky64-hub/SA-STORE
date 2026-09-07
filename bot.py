@@ -23,7 +23,7 @@ HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8"
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
 
@@ -31,34 +31,47 @@ def calculate_price(price):
 
     if price <= 25:
         return 3000
+
     elif price <= 50:
         return 4000
+
     elif price <= 100:
         return 6000
+
     elif price <= 150:
         return 8000
+
     elif price <= 200:
         return 10000
+
     elif price <= 300:
         return 13000
+
     elif price <= 400:
         return 15000
+
     elif price <= 500:
         return 18000
+
     elif price <= 550:
         return 20000
+
     elif price <= 650:
         return 23000
+
     elif price <= 750:
         return 26000
+
     elif price <= 850:
         return 29000
+
     elif price <= 1000:
         return 33000
-    else:
-        extra = price - 1000
-        extra_steps = math.ceil(extra / 100)
-        return 33000 + (extra_steps * 3000)
+
+    extra = price - 1000
+    extra_steps = math.ceil(extra / 100)
+
+    return 33000 + (extra_steps * 3000)
 
 
 def get_product_id(url):
@@ -109,14 +122,73 @@ def to_float(value):
     return None
 
 
-def get_xbox_game(url):
+def get_title(product):
 
-    product_id = get_product_id(url)
+    localized = product.get(
+        "LocalizedProperties",
+        []
+    )
 
-    if not product_id:
-        raise Exception(
-            "ماكدر أطلع Product ID من الرابط"
+    for item in localized:
+
+        title = item.get("ProductTitle")
+
+        if title:
+            return title
+
+    return product.get(
+        "ProductTitle",
+        "لعبة Xbox"
+    )
+
+
+def get_price_info(product):
+
+    market_properties = product.get(
+        "MarketProperties",
+        []
+    )
+
+    for market in market_properties:
+
+        price_data = market.get(
+            "Price",
+            {}
         )
+
+        if not isinstance(price_data, dict):
+            continue
+
+        msrp = to_float(
+            price_data.get("MSRP")
+            or price_data.get("ListPrice")
+            or price_data.get("BasePrice")
+        )
+
+        sale_price = to_float(
+            price_data.get("SalePrice")
+        )
+
+        # إذا أكو تخفيض
+        if (
+            sale_price is not None
+            and sale_price > 0
+            and msrp is not None
+            and sale_price < msrp
+        ):
+            return sale_price
+
+        # السعر الحالي
+        if sale_price is not None and sale_price > 0:
+            return sale_price
+
+        if msrp is not None and msrp > 0:
+            return msrp
+
+    return None
+
+
+def fetch_product(product_id):
 
     api_url = (
         "https://displaycatalog.mp.microsoft.com/"
@@ -141,87 +213,33 @@ def get_xbox_game(url):
 
     data = response.json()
 
-    products = data.get("Products", [])
+    products = data.get(
+        "Products",
+        []
+    )
 
-    if not products:
+    if products:
+        return products[0]
+
+    raise Exception(
+        "ما تم العثور على اللعبة في Xbox Catalog"
+    )
+
+
+def get_xbox_game(url):
+
+    product_id = get_product_id(url)
+
+    if not product_id:
         raise Exception(
-            "ما تم العثور على اللعبة"
+            "ماكدر أطلع Product ID من الرابط"
         )
 
-    product = products[0]
+    product = fetch_product(product_id)
 
-    title = None
+    title = get_title(product)
 
-    localized = product.get(
-        "LocalizedProperties",
-        []
-    )
-
-    for item in localized:
-
-        title = item.get("ProductTitle")
-
-        if title:
-            break
-
-    if not title:
-        title = product.get(
-            "ProductTitle",
-            "لعبة Xbox"
-        )
-
-    price = None
-
-    market_properties = product.get(
-        "MarketProperties",
-        []
-    )
-
-    for market in market_properties:
-
-        price_data = market.get(
-            "Price",
-            {}
-        )
-
-        if not isinstance(price_data, dict):
-            continue
-
-        sale_price = to_float(
-            price_data.get("SalePrice")
-        )
-
-        msrp = to_float(
-            price_data.get("MSRP")
-            or price_data.get("ListPrice")
-        )
-
-        if (
-            sale_price is not None
-            and msrp is not None
-            and sale_price < msrp
-        ):
-            price = sale_price
-            break
-
-        if sale_price is not None:
-            price = sale_price
-
-            if msrp is None:
-                break
-
-        if price is None and msrp is not None:
-            price = msrp
-
-        if price is None:
-
-            current_price = to_float(
-                price_data.get("CurrentPrice")
-                or price_data.get("Price")
-            )
-
-            if current_price is not None:
-                price = current_price
+    price = get_price_info(product)
 
     if price is None:
         raise Exception(
@@ -239,7 +257,7 @@ async def start(
     await update.message.reply_text(
         "🎮 SA STORE Price Bot 🇹🇷\n\n"
         "دزلي رابط أي لعبة من Xbox Store "
-        "وأحسبلك سعرها بالدينار العراقي 💰"
+        "وأجيبلك سعرها الحالي وسعر SA STORE."
     )
 
 
@@ -259,7 +277,7 @@ async def handle_link(
         return
 
     message = await update.message.reply_text(
-        "🔎 جاري فحص سعر اللعبة..."
+        "🔎 جاري فحص اللعبة والسعر..."
     )
 
     try:
@@ -271,7 +289,10 @@ async def handle_link(
         text = (
             f"🎮 اسم اللعبة:\n"
             f"{game_name}\n\n"
-            f"💰 السعر: "
+            f"🇹🇷 السعر الحالي: "
+            f"₺{try_price:,.2f}\n\n"
+            f"━━━━━━━━━━━━━━\n\n"
+            f"💰 سعر SA STORE: "
             f"{iq_price:,} دينار عراقي"
         )
 
@@ -319,7 +340,9 @@ def main():
         "SA STORE Bot is running..."
     )
 
-    app.run_polling()
+    app.run_polling(
+        drop_pending_updates=True
+    )
 
 
 if __name__ == "__main__":
