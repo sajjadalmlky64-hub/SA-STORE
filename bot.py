@@ -2,7 +2,6 @@ import os
 import re
 import math
 import requests
-from bs4 import BeautifulSoup
 
 from telegram import Update
 from telegram.ext import (
@@ -23,7 +22,8 @@ HEADERS = {
         "AppleWebKit/537.36 "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
 
@@ -67,10 +67,12 @@ def calculate_price(price):
 
 
 # ==========================================
-# استخراج Product ID
+# استخراج Product ID من الرابط
 # ==========================================
 
 def get_product_id(url):
+
+    url = url.split("?")[0].rstrip("/")
 
     matches = re.findall(
         r"(?<![A-Z0-9])([A-Z0-9]{12})(?![A-Z0-9])",
@@ -92,48 +94,57 @@ def to_float(value):
     if value is None:
         return None
 
-    value = str(value)
-
-    value = (
-        value.replace("₺", "")
-        .replace("TRY", "")
-        .replace("TL", "")
-        .replace("\xa0", "")
-        .replace(" ", "")
-        .strip()
-    )
-
-    if "," in value and "." in value:
-
-        if value.rfind(",") > value.rfind("."):
-            value = value.replace(".", "").replace(",", ".")
-        else:
-            value = value.replace(",", "")
-
-    elif "," in value:
-        value = value.replace(",", ".")
-
-    try:
+    if isinstance(value, (int, float)):
         return float(value)
 
-    except ValueError:
-        return None
+    if isinstance(value, str):
+
+        value = (
+            value.replace("₺", "")
+            .replace("TL", "")
+            .replace("TRY", "")
+            .replace("\xa0", "")
+            .replace(" ", "")
+            .strip()
+        )
+
+        if "," in value and "." in value:
+
+            if value.rfind(",") > value.rfind("."):
+                value = value.replace(".", "").replace(",", ".")
+            else:
+                value = value.replace(",", "")
+
+        elif "," in value:
+
+            parts = value.split(",")
+
+            if len(parts[-1]) == 3:
+                value = value.replace(",", "")
+            else:
+                value = value.replace(",", ".")
+
+        try:
+            return float(value)
+
+        except ValueError:
+            return None
+
+    return None
 
 
 # ==========================================
-# جلب اسم اللعبة من Xbox
+# جلب بيانات اللعبة من Microsoft
 # ==========================================
 
-def get_xbox_game_name(product_id):
+def fetch_product(product_id):
 
-    api_url = (
-        "https://displaycatalog.mp.microsoft.com/"
-        f"v7.0/products/{product_id}"
-    )
+    api_url = "https://displaycatalog.mp.microsoft.com/v7.0/products"
 
     params = {
+        "bigIds": product_id,
         "market": "TR",
-        "languages": "en-US,tr-TR",
+        "languages": "tr-TR,en-US",
         "fieldsTemplate": "Details"
     }
 
@@ -144,220 +155,203 @@ def get_xbox_game_name(product_id):
         timeout=30
     )
 
+    print("STATUS:", response.status_code)
+    print("API URL:", response.url)
+
     response.raise_for_status()
 
     data = response.json()
 
-    product = data.get("Product")
+    products = data.get("Products", [])
 
-    if not product:
+    if not products:
+        raise Exception(
+            f"ما تم العثور على اللعبة. Product ID: {product_id}"
+        )
 
-        products = data.get("Products", [])
+    return products[0]
 
-        if products:
-            product = products[0]
 
-    if not product:
-        raise Exception("ما تم العثور على اللعبة")
+# ==========================================
+# اسم اللعبة
+# ==========================================
+
+def get_title(product):
 
     localized = product.get(
         "LocalizedProperties",
         []
     )
 
+    # نفضل الإنجليزي
     for item in localized:
 
-        title = item.get("ProductTitle")
+        language = item.get(
+            "Language",
+            ""
+        ).lower()
+
+        title = item.get(
+            "ProductTitle"
+        )
+
+        if title and language.startswith("en"):
+            return title
+
+    # أي اسم متوفر
+    for item in localized:
+
+        title = item.get(
+            "ProductTitle"
+        )
 
         if title:
             return title
 
-    title = product.get("ProductTitle")
-
-    if title:
-        return title
-
-    raise Exception("ماكدر أطلع اسم اللعبة")
+    return product.get(
+        "ProductTitle",
+        "لعبة Xbox"
+    )
 
 
 # ==========================================
-# البحث في Xbox-Now
+# استخراج السعر الحقيقي
 # ==========================================
 
-def search_xbox_now(game_name):
+def get_price_info(product):
 
-    search_url = (
-        "https://www.xbox-now.com/en/search"
+    market_properties = product.get(
+        "MarketProperties",
+        []
     )
 
-    params = {
-        "q": game_name
-    }
+    best_current = None
+    best_original = None
+    best_discount = 0
 
-    response = requests.get(
-        search_url,
-        params=params,
-        headers=HEADERS,
-        timeout=30
-    )
+    for market in market_properties:
 
-    if response.status_code != 200:
-        raise Exception(
-            "Xbox-Now ما رجع الصفحة بشكل صحيح"
+        price_data = market.get(
+            "Price",
+            {}
         )
 
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
+        if not isinstance(price_data, dict):
+            continue
 
-    links = []
+        # السعر الأصلي
+        original = to_float(
+            price_data.get("MSRP")
+            or price_data.get("ListPrice")
+            or price_data.get("BasePrice")
+        )
 
-    for a in soup.find_all("a", href=True):
+        # سعر التخفيض
+        sale = to_float(
+            price_data.get("SalePrice")
+            or price_data.get("DiscountPrice")
+        )
 
-        href = a["href"]
+        # السعر الحالي المباشر
+        current = to_float(
+            price_data.get("Price")
+            or price_data.get("RetailPrice")
+        )
 
-        if re.match(
-            r"^/[a-z]{2}/game/\d+/",
-            href
+        # إذا أكو تخفيض
+        if (
+            sale is not None
+            and original is not None
+            and sale < original
         ):
 
-            title = a.get_text(
-                " ",
-                strip=True
+            discount = (
+                (original - sale) / original
+            ) * 100
+
+            return (
+                sale,
+                original,
+                discount
             )
 
-            links.append(
-                (
-                    title,
-                    "https://www.xbox-now.com" + href
-                )
+        # أحياناً السعر الحالي يكون داخل Price
+        if (
+            current is not None
+            and original is not None
+            and current < original
+        ):
+
+            discount = (
+                (original - current) / original
+            ) * 100
+
+            return (
+                current,
+                original,
+                discount
             )
 
-    if not links:
-        raise Exception(
-            "ماكدر ألقى اللعبة في Xbox-Now"
+        # بدون تخفيض
+        if current is not None:
+
+            if (
+                best_current is None
+                or current < best_current
+            ):
+                best_current = current
+
+        elif original is not None:
+
+            if (
+                best_current is None
+                or original < best_current
+            ):
+                best_current = original
+
+    if best_current is not None:
+
+        return (
+            best_current,
+            best_original,
+            best_discount
         )
-
-    # نحاول اختيار أقرب اسم
-    target = game_name.lower()
-
-    for title, link in links:
-
-        if target in title.lower():
-            return link
-
-    return links[0][1]
-
-
-# ==========================================
-# استخراج السعر التركي
-# ==========================================
-
-def get_turkish_price(game_url):
-
-    response = requests.get(
-        game_url,
-        headers=HEADERS,
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
-
-    text = soup.get_text(
-        "\n",
-        strip=True
-    )
-
-    # نبحث عن قسم تركيا
-    turkey_match = re.search(
-        r"TR Turkey(.*?)(?:Image:|Deal until|Prices last updated|$)",
-        text,
-        re.DOTALL | re.IGNORECASE
-    )
-
-    if turkey_match:
-
-        turkey_text = turkey_match.group(1)
-
-        prices = re.findall(
-            r"([\d.,]+)\s*TRY",
-            turkey_text,
-            re.IGNORECASE
-        )
-
-        if prices:
-
-            values = []
-
-            for price in prices:
-
-                number = to_float(price)
-
-                if number is not None:
-                    values.append(number)
-
-            if values:
-                # نأخذ أقل سعر = السعر الفعلي
-                return min(values)
-
-    # بحث عام احتياطي
-    prices = re.findall(
-        r"([\d.,]+)\s*TRY",
-        text,
-        re.IGNORECASE
-    )
-
-    values = []
-
-    for price in prices:
-
-        number = to_float(price)
-
-        if number is not None:
-            values.append(number)
-
-    if values:
-        return min(values)
 
     raise Exception(
-        "ماكدر أطلع السعر التركي من Xbox-Now"
+        "تم العثور على اللعبة لكن ماكدر أطلع السعر التركي"
     )
 
 
 # ==========================================
-# جلب اللعبة والسعر
+# جلب اللعبة
 # ==========================================
 
-def get_game_info(url):
+def get_xbox_game(url):
 
     product_id = get_product_id(url)
 
     if not product_id:
+
         raise Exception(
             "ماكدر أطلع Product ID من الرابط"
         )
 
-    game_name = get_xbox_game_name(
+    product = fetch_product(
         product_id
     )
 
-    game_url = search_xbox_now(
-        game_name
+    title = get_title(product)
+
+    current_price, original_price, discount = (
+        get_price_info(product)
     )
 
-    print("XBOX NOW GAME:", game_url)
-
-    try_price = get_turkish_price(
-        game_url
+    return (
+        title,
+        current_price,
+        original_price,
+        discount
     )
-
-    return game_name, try_price
 
 
 # ==========================================
@@ -385,6 +379,9 @@ async def handle_link(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    if not update.message:
+        return
+
     url = update.message.text.strip()
 
     if "xbox.com" not in url.lower():
@@ -396,14 +393,17 @@ async def handle_link(
         return
 
     message = await update.message.reply_text(
-        "🔎 جاري البحث عن اللعبة والسعر..."
+        "🔎 جاري فحص اللعبة والسعر الحالي..."
     )
 
     try:
 
-        game_name, try_price = get_game_info(
-            url
-        )
+        (
+            game_name,
+            try_price,
+            original_price,
+            discount
+        ) = get_xbox_game(url)
 
         iq_price = calculate_price(
             try_price
@@ -413,8 +413,26 @@ async def handle_link(
             f"🎮 اسم اللعبة:\n"
             f"{game_name}\n\n"
             f"🇹🇷 السعر الحالي: "
-            f"₺{try_price:,.2f}\n\n"
-            f"━━━━━━━━━━━━━━\n\n"
+            f"₺{try_price:,.2f}\n"
+        )
+
+        if (
+            original_price is not None
+            and original_price > try_price
+        ):
+
+            text += (
+                f"🏷️ السعر الأصلي: "
+                f"₺{original_price:,.2f}\n"
+            )
+
+            text += (
+                f"🔥 التخفيض: "
+                f"%{discount:.0f}\n"
+            )
+
+        text += (
+            f"\n━━━━━━━━━━━━━━\n\n"
             f"💰 سعر SA STORE: "
             f"{iq_price:,} دينار عراقي"
         )
@@ -474,4 +492,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
