@@ -178,7 +178,7 @@ def to_float(value):
     try:
         return float(value)
 
-    except:
+    except (ValueError, TypeError):
         pass
 
     value = str(value)
@@ -211,32 +211,298 @@ def to_float(value):
 
 
 # ==========================================
-# استخراج السعر من بيانات Microsoft
+# استخراج السعر بشكل متكرر
 # ==========================================
 
 def find_price_recursive(data):
 
     if isinstance(data, dict):
 
-        # أسماء حقول السعر المحتملة
-        price_keys = [
+        priority_keys = [
             "ListPrice",
-            "Price",
             "MSRP",
             "OriginalPrice",
-            "PriceInCents",
-            "UnitPrice"
+            "UnitPrice",
+            "Price"
         ]
 
-        for key in price_keys:
+        for key in priority_keys:
 
             if key in data:
 
                 value = data[key]
 
-                # إذا كان السعر رقم
                 if isinstance(value, (int, float)):
 
                     if value > 0:
+                        return float(value)
 
-                        # إذا كان بالسنت
+                elif isinstance(value, str):
+
+                    number = to_float(value)
+
+                    if number and number > 0:
+                        return number
+
+                elif isinstance(value, dict):
+
+                    result = find_price_recursive(value)
+
+                    if result:
+                        return result
+
+        for value in data.values():
+
+            result = find_price_recursive(value)
+
+            if result:
+                return result
+
+    elif isinstance(data, list):
+
+        for item in data:
+
+            result = find_price_recursive(item)
+
+            if result:
+                return result
+
+    return None
+
+
+# ==========================================
+# جلب سعر اللعبة من Microsoft Store API
+# ==========================================
+
+def get_product_price(product_id):
+
+    api_url = "https://purchase.mp.microsoft.com/v9.0/users/me/availability"
+
+    params = {
+        "market": "TR",
+        "languages": "tr-TR",
+        "productIds": product_id
+    }
+
+    response = requests.get(
+        api_url,
+        params=params,
+        headers=HEADERS,
+        timeout=30
+    )
+
+    if response.status_code == 200:
+
+        try:
+            data = response.json()
+
+            price = find_price_recursive(data)
+
+            if price:
+                return price
+
+        except Exception:
+            pass
+
+    return None
+
+
+# ==========================================
+# استخراج السعر من صفحة Xbox
+# ==========================================
+
+def get_price_from_store_page(url):
+
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    html = response.text
+
+    patterns = [
+
+        r'"price"\s*:\s*"([0-9.,]+)"',
+
+        r'"listPrice"\s*:\s*"([0-9.,]+)"',
+
+        r'"ListPrice"\s*:\s*([0-9.,]+)',
+
+        r'([0-9]{1,5}(?:[.,][0-9]{1,2})?)\s*₺',
+
+        r'₺\s*([0-9]{1,5}(?:[.,][0-9]{1,2})?)'
+    ]
+
+    prices = []
+
+    for pattern in patterns:
+
+        matches = re.findall(
+            pattern,
+            html,
+            re.IGNORECASE
+        )
+
+        for match in matches:
+
+            price = to_float(match)
+
+            if price and price > 0:
+                prices.append(price)
+
+    if prices:
+        return min(prices)
+
+    return None
+
+
+# ==========================================
+# جلب كل معلومات اللعبة
+# ==========================================
+
+def get_game_info(url):
+
+    product_id = get_product_id(url)
+
+    if not product_id:
+        raise Exception("ماكدر أطلع Product ID من الرابط")
+
+    product = get_product_data(product_id)
+
+    game_name = get_game_name(product)
+
+    price = get_product_price(product_id)
+
+    if not price:
+        price = find_price_recursive(product)
+
+    if not price:
+        price = get_price_from_store_page(url)
+
+    if not price:
+        raise Exception("ماكدر أطلع سعر اللعبة")
+
+    return game_name, price
+
+
+# ==========================================
+# أمر Start
+# ==========================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    message = (
+        "🎮 SA STORE Price Bot 🇹🇷\n\n"
+        "دزلي رابط أي لعبة من Xbox Store "
+        "وأجيبلك السعر التركي الحالي.\n\n"
+        "بعدها أحسبلك سعر SA STORE 💰"
+    )
+
+    await update.message.reply_text(message)
+
+
+# ==========================================
+# استقبال رابط Xbox
+# ==========================================
+
+async def handle_link(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    text = update.message.text.strip()
+
+    if "xbox.com" not in text.lower():
+
+        await update.message.reply_text(
+            "❌ خطأ\n\n"
+            "دزلي رابط لعبة من Xbox Store."
+        )
+
+        return
+
+    processing_message = await update.message.reply_text(
+        "⏳ جاري البحث عن اللعبة والسعر..."
+    )
+
+    try:
+
+        game_name, turkey_price = get_game_info(text)
+
+        store_price = calculate_price(turkey_price)
+
+        turkey_price_text = (
+            f"{turkey_price:,.2f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", ".")
+        )
+
+        store_price_text = (
+            f"{store_price:,}"
+            .replace(",", ".")
+        )
+
+        result = (
+            f"🎮 {game_name}\n\n"
+            f"🇹🇷 السعر التركي: {turkey_price_text} ₺\n"
+            f"💰 سعر SA STORE: {store_price_text} دينار عراقي"
+        )
+
+        await processing_message.edit_text(result)
+
+    except Exception as error:
+
+        print("ERROR:", error)
+
+        await processing_message.edit_text(
+            "❌ صار خطأ أثناء جلب معلومات اللعبة.\n\n"
+            "تأكد أن الرابط صحيح وجرب مرة ثانية."
+        )
+
+
+# ==========================================
+# تشغيل البوت
+# ==========================================
+
+def main():
+
+    if not BOT_TOKEN:
+
+        raise ValueError(
+            "BOT_TOKEN غير موجود في Variables"
+        )
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_link
+        )
+    )
+
+    print("SA STORE Bot is running...")
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
