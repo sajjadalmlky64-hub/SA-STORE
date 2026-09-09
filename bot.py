@@ -4,8 +4,6 @@ import math
 import asyncio
 import requests
 
-from collections import Counter
-
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -31,9 +29,9 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "application/json,text/plain,*/*",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
@@ -106,7 +104,7 @@ def calculate_price(price):
 
 
 # =========================================================
-# استخراج Product ID من الرابط
+# استخراج Product ID من رابط Xbox
 # =========================================================
 
 def get_product_id(url):
@@ -123,7 +121,7 @@ def get_product_id(url):
 
 
 # =========================================================
-# تحويل السعر إلى رقم
+# تحويل القيمة إلى رقم
 # =========================================================
 
 def to_float(value):
@@ -131,13 +129,10 @@ def to_float(value):
     if value is None:
         return None
 
-
     if isinstance(value, (int, float)):
         return float(value)
 
-
     value = str(value).strip()
-
 
     value = (
         value.replace("₺", "")
@@ -145,13 +140,9 @@ def to_float(value):
         .replace("TL", "")
         .replace("\xa0", "")
         .replace(" ", "")
-        .strip()
     )
 
-
-    # مثال:
-    # 1.999,00
-
+    # مثال: 1.299,00
     if "," in value and "." in value:
 
         if value.rfind(",") > value.rfind("."):
@@ -163,14 +154,10 @@ def to_float(value):
 
             value = value.replace(",", "")
 
-
-    # مثال:
-    # 999,00
-
+    # مثال: 299,00
     elif "," in value:
 
         value = value.replace(",", ".")
-
 
     try:
         return float(value)
@@ -180,110 +167,48 @@ def to_float(value):
 
 
 # =========================================================
-# استخراج رقم من قيمة
-# =========================================================
-
-def extract_number(value):
-
-    if value is None:
-        return None
-
-
-    if isinstance(value, (int, float, str)):
-
-        return to_float(value)
-
-
-    if isinstance(value, dict):
-
-        priority_keys = [
-
-            "Amount",
-            "amount",
-
-            "Value",
-            "value",
-
-            "Price",
-            "price",
-
-            "FormattedPrice",
-            "formattedPrice"
-        ]
-
-
-        for key in priority_keys:
-
-            if key in value:
-
-                result = extract_number(
-                    value[key]
-                )
-
-                if result is not None:
-
-                    return result
-
-
-    return None
-
-
-# =========================================================
-# جلب بيانات المنتج من Microsoft
+# جلب بيانات المنتج من Microsoft Display Catalog
 # =========================================================
 
 def get_product_data(product_id):
 
-    api_url = (
+    url = (
         "https://displaycatalog.mp.microsoft.com/"
-        f"v7.0/products/{product_id}"
+        "v7.0/products"
     )
 
-
     params = {
+        "bigIds": product_id,
         "market": "TR",
         "languages": "tr-TR,en-US",
-        "fieldsTemplate": "Details"
+        "fieldsTemplate": "Details",
+        "actionFilter": "Browse"
     }
 
-
     response = SESSION.get(
-        api_url,
+        url,
         params=params,
         timeout=30
     )
 
-
     response.raise_for_status()
-
 
     data = response.json()
 
+    products = data.get("Products", [])
 
-    product = data.get("Product")
+    if not products:
 
+        product = data.get("Product")
 
-    if not product:
-
-        products = data.get(
-            "Products",
-            []
-        )
-
-
-        if products:
-
-            product = products[0]
-
-
-    if not product:
+        if product:
+            return product
 
         raise Exception(
-            "لم يتم العثور على معلومات اللعبة"
+            "Microsoft لم يعثر على اللعبة"
         )
 
-
-    return product
+    return products[0]
 
 
 # =========================================================
@@ -297,436 +222,177 @@ def get_game_name(product):
         []
     )
 
-
+    # نحاول أخذ الاسم التركي أو أول اسم موجود
     for item in localized:
 
-        title = item.get(
-            "ProductTitle"
-        )
-
+        title = item.get("ProductTitle")
 
         if title:
-
             return title
 
 
-    title = product.get(
-        "ProductTitle"
-    )
-
+    # بديل
+    title = product.get("ProductTitle")
 
     if title:
-
         return title
 
 
-    return "لعبة"
+    return "لعبة Xbox"
 
 
 # =========================================================
-# جلب بيانات الأسعار من Microsoft Purchase API
+# استخراج السعر الصحيح من Display Catalog
 # =========================================================
 
-def get_purchase_data(product_id):
+def get_prices_from_catalog(product):
 
-    api_url = (
-        "https://purchase.mp.microsoft.com/"
-        "v9.0/users/me/availability"
+    results = []
+
+    sku_availabilities = product.get(
+        "DisplaySkuAvailabilities",
+        []
     )
 
 
-    params = {
-        "market": "TR",
-        "languages": "tr-TR",
-        "productIds": product_id
-    }
-
-
-    response = SESSION.get(
-        api_url,
-        params=params,
-        timeout=30
-    )
-
-
-    print(
-        "PURCHASE STATUS:",
-        response.status_code
-    )
-
-
-    response.raise_for_status()
-
-
-    return response.json()
-
-
-# =========================================================
-# أسماء السعر الحالي
-# =========================================================
-
-CURRENT_PRICE_KEYS = [
-
-    "SalePrice",
-    "salePrice",
-
-    "DiscountPrice",
-    "discountPrice",
-
-    "CurrentPrice",
-    "currentPrice",
-
-    "UnitPrice",
-    "unitPrice",
-
-    "SellingPrice",
-    "sellingPrice",
-
-    "PurchasePrice",
-    "purchasePrice"
-]
-
-
-# =========================================================
-# أسماء السعر الأصلي
-# =========================================================
-
-ORIGINAL_PRICE_KEYS = [
-
-    "ListPrice",
-    "listPrice",
-
-    "MSRP",
-    "msrp",
-
-    "OriginalPrice",
-    "originalPrice",
-
-    "RegularPrice",
-    "regularPrice",
-
-    "BasePrice",
-    "basePrice"
-]
-
-
-# =========================================================
-# فحص هل البيانات تركية
-# =========================================================
-
-def is_turkish_currency(data):
-
-    if not isinstance(data, dict):
-        return True
-
-
-    currency_keys = [
-
-        "CurrencyCode",
-        "currencyCode",
-
-        "Currency",
-        "currency"
-    ]
-
-
-    for key in currency_keys:
-
-        if key in data:
-
-            value = data[key]
-
-
-            if isinstance(value, str):
-
-                value = value.upper().strip()
-
-
-                if value in [
-                    "TRY",
-                    "TL",
-                    "₺"
-                ]:
-
-                    return True
-
-
-                # إذا كانت عملة ثانية نرفضها
-                if len(value) == 3:
-
-                    return False
-
-
-    return True
-
-
-# =========================================================
-# استخراج السعر الحالي والأصلي من نفس الـ object
-# =========================================================
-
-def extract_price_pair_from_object(data):
-
-    if not isinstance(data, dict):
-
-        return None
-
-
-    # ==========================================
-    # إذا العملة واضحة وليست تركية
-    # ==========================================
-
-    if not is_turkish_currency(data):
-
-        return None
-
-
-    current = None
-    original = None
-
-
-    # ==========================================
-    # السعر الحالي
-    # ==========================================
-
-    for key in CURRENT_PRICE_KEYS:
-
-        if key in data:
-
-            value = extract_number(
-                data[key]
-            )
-
-
-            if value is not None and value > 0:
-
-                current = value
-                break
-
-
-    # ==========================================
-    # السعر الأصلي
-    # ==========================================
-
-    for key in ORIGINAL_PRICE_KEYS:
-
-        if key in data:
-
-            value = extract_number(
-                data[key]
-            )
-
-
-            if value is not None and value > 0:
-
-                original = value
-                break
-
-
-    # ==========================================
-    # بعض Microsoft objects تحتوي Price object
-    # ==========================================
-
-    if current is None and "Price" in data:
-
-        price_data = data["Price"]
-
-
-        if isinstance(price_data, dict):
-
-            for key in CURRENT_PRICE_KEYS:
-
-                if key in price_data:
-
-                    value = extract_number(
-                        price_data[key]
-                    )
-
-
-                    if value is not None and value > 0:
-
-                        current = value
-                        break
-
-
-            for key in ORIGINAL_PRICE_KEYS:
-
-                if key in price_data:
-
-                    value = extract_number(
-                        price_data[key]
-                    )
-
-
-                    if value is not None and value > 0:
-
-                        original = value
-                        break
-
-
-    # ==========================================
-    # بعض البيانات تستخدم UnitPrice فقط
-    # ==========================================
-
-    if current is None:
-
-        simple_keys = [
-
-            "Price",
-            "price",
-
-            "Amount",
-            "amount"
-        ]
-
-
-        for key in simple_keys:
-
-            if key in data:
-
-                value = extract_number(
-                    data[key]
-                )
-
-
-                if value is not None and value > 0:
-
-                    current = value
-                    break
-
-
-    if current is None:
-
-        return None
-
-
-    return (
-        current,
-        original
-    )
-
-
-# =========================================================
-# البحث داخل بيانات Microsoft
-# =========================================================
-
-def find_price_pairs(data, results=None):
-
-    if results is None:
-
-        results = []
-
-
-    if isinstance(data, dict):
-
-
-        pair = extract_price_pair_from_object(
-            data
+    for sku_data in sku_availabilities:
+
+        availabilities = sku_data.get(
+            "Availabilities",
+            []
         )
 
 
-        if pair:
+        for availability in availabilities:
 
-            results.append(pair)
+            order_data = availability.get(
+                "OrderManagementData",
+                {}
+            )
+
+            price_data = order_data.get(
+                "Price",
+                {}
+            )
 
 
-        for value in data.values():
+            if not price_data:
+                continue
 
-            if isinstance(
-                value,
-                (dict, list)
+
+            # السعر الحالي
+            list_price = to_float(
+                price_data.get("ListPrice")
+            )
+
+
+            # السعر الأصلي
+            msrp = to_float(
+                price_data.get("MSRP")
+            )
+
+
+            # العملة
+            currency = price_data.get(
+                "CurrencyCode",
+                ""
+            )
+
+
+            # نريد فقط الليرة التركية
+            if currency and currency.upper() not in [
+                "TRY",
+                "TL"
+            ]:
+                continue
+
+
+            # تجاهل الأسعار الفارغة
+            if list_price is None:
+                continue
+
+            if list_price <= 0:
+                continue
+
+
+            # =============================================
+            # إذا MSRP أكبر من السعر الحالي = تخفيض حقيقي
+            # =============================================
+
+            if (
+                msrp is not None
+                and msrp > list_price
             ):
 
-                find_price_pairs(
-                    value,
-                    results
+                results.append(
+                    (
+                        list_price,
+                        msrp
+                    )
                 )
 
+            else:
 
-    elif isinstance(data, list):
-
-        for item in data:
-
-            find_price_pairs(
-                item,
-                results
-            )
+                results.append(
+                    (
+                        list_price,
+                        None
+                    )
+                )
 
 
     return results
 
 
 # =========================================================
-# تنظيف الأسعار
+# اختيار السعر الأفضل
 # =========================================================
 
-def clean_price_pairs(pairs):
+def determine_best_price(price_pairs):
 
-    cleaned = []
+    if not price_pairs:
+        return None, None
 
 
-    for current, original in pairs:
+    valid_pairs = []
 
+
+    for current, original in price_pairs:
 
         try:
-
             current = float(current)
 
         except Exception:
-
             continue
 
 
-        # ==========================================
-        # تجاهل الأسعار غير المنطقية
-        # ==========================================
-
-        if current <= 0:
-
+        # حماية من البيانات الغريبة
+        if current <= 0 or current > 50000:
             continue
 
-
-        if current > 50000:
-
-            continue
-
-
-        # منع أسعار التجربة الوهمية
-        # مثل 0 أو قيم صغيرة جداً
-        #
-        # ملاحظة: ما نرفض أقل من 5
-        # لأن بعض الألعاب فعلاً رخيصة
-
-
-        # ==========================================
-        # السعر الأصلي
-        # ==========================================
 
         if original is not None:
 
             try:
-
                 original = float(original)
 
             except Exception:
-
                 original = None
 
+
+        # =============================================
+        # تنظيف التخفيض
+        # =============================================
 
         if original is not None:
 
-
             if original <= current:
-
                 original = None
-
 
             elif original > 50000:
-
                 original = None
 
-
             else:
-
 
                 discount = (
                     (original - current)
@@ -734,59 +400,36 @@ def clean_price_pairs(pairs):
                 ) * 100
 
 
-                # ==================================
-                # منع خصم 99% و 100% الوهمي
-                # ==================================
-
+                # منع خصم 100% الوهمي
                 if discount >= 99:
-
                     original = None
 
 
-        cleaned.append(
+        valid_pairs.append(
             (
-                round(current, 2),
-                round(original, 2)
-                if original is not None
-                else None
+                current,
+                original
             )
         )
 
 
-    return cleaned
-
-
-# =========================================================
-# اختيار أفضل زوج أسعار
-# =========================================================
-
-def determine_best_price(pairs):
-
-    pairs = clean_price_pairs(
-        pairs
-    )
-
-
-    if not pairs:
-
+    if not valid_pairs:
         return None, None
 
 
     # =====================================================
-    # 1 - نبحث عن التخفيضات الحقيقية
+    # أولاً: البحث عن تخفيض حقيقي
     # =====================================================
 
-    discounted_pairs = []
+    discounted = []
 
 
-    for current, original in pairs:
-
+    for current, original in valid_pairs:
 
         if (
             original is not None
             and original > current
         ):
-
 
             discount = (
                 (original - current)
@@ -796,8 +439,7 @@ def determine_best_price(pairs):
 
             if 1 <= discount < 99:
 
-
-                discounted_pairs.append(
+                discounted.append(
                     (
                         current,
                         original
@@ -805,177 +447,51 @@ def determine_best_price(pairs):
                 )
 
 
-    # =====================================================
-    # إذا وجدنا تخفيضات
-    # =====================================================
+    # إذا وجدنا تخفيض
+    if discounted:
 
-    if discounted_pairs:
-
-
-        counter = Counter(
-            discounted_pairs
-        )
-
-
-        # الأكثر تكراراً
-        best_pair = counter.most_common(
-            1
-        )[0][0]
-
-
-        return (
-            best_pair[0],
-            best_pair[1]
-        )
-
-
-    # =====================================================
-    # 2 - بدون تخفيض
-    # =====================================================
-
-    normal_prices = []
-
-
-    for current, original in pairs:
-
-        if current is not None:
-
-            normal_prices.append(
-                current
+        # نزيل التكرار
+        unique = list(
+            set(
+                (
+                    round(current, 2),
+                    round(original, 2)
+                )
+                for current, original in discounted
             )
+        )
 
 
-    if not normal_prices:
+        # نختار السعر الأقل الحالي
+        # لأنه غالباً العرض الحقيقي
+        unique.sort(
+            key=lambda x: x[0]
+        )
 
+
+        return unique[0]
+
+
+    # =====================================================
+    # بدون تخفيض
+    # =====================================================
+
+    prices = list(
+        set(
+            round(current, 2)
+            for current, original in valid_pairs
+        )
+    )
+
+
+    if not prices:
         return None, None
 
 
-    counter = Counter(
-        normal_prices
-    )
+    # نأخذ أقل سعر صالح
+    prices.sort()
 
-
-    # الأكثر تكراراً
-    best_price = counter.most_common(
-        1
-    )[0][0]
-
-
-    return (
-        best_price,
-        None
-    )
-
-
-# =========================================================
-# جلب السعر من الصفحة التركية كـ Fallback
-# =========================================================
-
-def get_price_from_turkish_page(product_id):
-
-    url = (
-        "https://www.xbox.com/tr-tr/games/store/"
-        f"{product_id}"
-    )
-
-
-    response = SESSION.get(
-        url,
-        timeout=30,
-        allow_redirects=True
-    )
-
-
-    if response.status_code != 200:
-
-        print(
-            "PAGE STATUS:",
-            response.status_code
-        )
-
-        return []
-
-
-    html = response.text
-
-
-    pairs = []
-
-
-    # =====================================================
-    # البحث عن السعر التركي فقط
-    # =====================================================
-
-    prices = re.findall(
-        r'([0-9]{1,3}(?:\.[0-9]{3})*(?:,[0-9]{2})?)\s*₺',
-        html
-    )
-
-
-    converted = []
-
-
-    for price_text in prices:
-
-        price = to_float(
-            price_text
-        )
-
-
-        if price is not None:
-
-            if (
-                price > 0
-                and price < 50000
-            ):
-
-                converted.append(
-                    round(price, 2)
-                )
-
-
-    # إزالة التكرار
-    converted = list(
-        dict.fromkeys(converted)
-    )
-
-
-    # إذا لقينا سعر واحد
-    if len(converted) == 1:
-
-        pairs.append(
-            (
-                converted[0],
-                None
-            )
-        )
-
-
-    # إذا لقينا سعرين، الأصغر غالباً الحالي
-    elif len(converted) == 2:
-
-
-        low = min(converted)
-        high = max(converted)
-
-
-        discount = (
-            (high - low)
-            / high
-        ) * 100
-
-
-        if discount < 99:
-
-            pairs.append(
-                (
-                    low,
-                    high
-                )
-            )
-
-
-    return pairs
+    return prices[0], None
 
 
 # =========================================================
@@ -985,13 +501,8 @@ def get_price_from_turkish_page(product_id):
 def get_game_info(url):
 
 
-    # =====================================================
     # استخراج Product ID
-    # =====================================================
-
-    product_id = get_product_id(
-        url
-    )
+    product_id = get_product_id(url)
 
 
     if not product_id:
@@ -1007,19 +518,13 @@ def get_game_info(url):
     )
 
 
-    # =====================================================
-    # بيانات اللعبة
-    # =====================================================
-
+    # جلب بيانات اللعبة
     product = get_product_data(
         product_id
     )
 
 
-    # =====================================================
-    # الاسم
-    # =====================================================
-
+    # اسم اللعبة
     game_name = get_game_name(
         product
     )
@@ -1031,90 +536,22 @@ def get_game_info(url):
     )
 
 
-    all_pairs = []
+    # استخراج الأسعار
+    price_pairs = get_prices_from_catalog(
+        product
+    )
 
 
-    # =====================================================
-    # 1 - Purchase API
-    # المصدر الرئيسي للسعر
-    # =====================================================
-
-    try:
+    print(
+        "PRICE PAIRS:",
+        price_pairs
+    )
 
 
-        purchase_data = get_purchase_data(
-            product_id
-        )
-
-
-        purchase_pairs = find_price_pairs(
-            purchase_data
-        )
-
-
-        print(
-            "PURCHASE PAIRS:",
-            purchase_pairs
-        )
-
-
-        all_pairs.extend(
-            purchase_pairs
-        )
-
-
-    except Exception as error:
-
-
-        print(
-            "PURCHASE ERROR:",
-            repr(error)
-        )
-
-
-    # =====================================================
-    # 2 - صفحة Xbox التركية
-    # Fallback فقط
-    # =====================================================
-
-    if not all_pairs:
-
-
-        try:
-
-
-            page_pairs = get_price_from_turkish_page(
-                product_id
-            )
-
-
-            print(
-                "PAGE PAIRS:",
-                page_pairs
-            )
-
-
-            all_pairs.extend(
-                page_pairs
-            )
-
-
-        except Exception as error:
-
-
-            print(
-                "PAGE ERROR:",
-                repr(error)
-            )
-
-
-    # =====================================================
-    # اختيار السعر النهائي
-    # =====================================================
-
+    # اختيار السعر الصحيح
     current_price, original_price = (
         determine_best_price(
-            all_pairs
+            price_pairs
         )
     )
 
@@ -1122,20 +559,8 @@ def get_game_info(url):
     if current_price is None:
 
         raise Exception(
-            "ماكدر أطلع سعر اللعبة من Microsoft"
+            "Microsoft لم يعثر على سعر اللعبة"
         )
-
-
-    print(
-        "FINAL PRICE:",
-        current_price
-    )
-
-
-    print(
-        "ORIGINAL PRICE:",
-        original_price
-    )
 
 
     return (
@@ -1146,21 +571,7 @@ def get_game_info(url):
 
 
 # =========================================================
-# تنسيق السعر التركي
-# =========================================================
-
-def format_turkish_price(price):
-
-    return (
-        f"{price:,.2f}"
-        .replace(",", "X")
-        .replace(".", ",")
-        .replace("X", ".")
-    )
-
-
-# =========================================================
-# تنسيق السعر العراقي
+# تنسيق سعر SA STORE
 # =========================================================
 
 def format_store_price(price):
@@ -1189,10 +600,8 @@ async def start(
 ):
 
     await update.message.reply_text(
-
-        "🎮 SA STORE Price Bot 🇹🇷\n\n"
-        "دزلي رابط أي لعبة من Xbox Store "
-        "وأطلعلك سعرها وسعر SA STORE 💰"
+        "🎮 أرسل رابط أي لعبة من Xbox Store\n\n"
+        "وأطلعلك سعر SA STORE 💰🇮🇶"
     )
 
 
@@ -1205,9 +614,7 @@ async def handle_link(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-
     if not update.message:
-
         return
 
 
@@ -1215,14 +622,13 @@ async def handle_link(
 
 
     # =====================================================
-    # التأكد من الرابط
+    # التأكد من أنه رابط Xbox
     # =====================================================
 
     if "xbox.com" not in text.lower():
 
         await update.message.reply_text(
-
-            "❌ دزلي رابط لعبة من Xbox Store فقط."
+            "❌ يرجى إرسال رابط لعبة من Xbox Store"
         )
 
         return
@@ -1232,27 +638,19 @@ async def handle_link(
     # رسالة الانتظار
     # =====================================================
 
-    processing_message = (
-        await update.message.reply_text(
-
-            "⏳ جاري البحث عن اللعبة..."
-        )
+    processing_message = await update.message.reply_text(
+        "⏳ جاري البحث عن اللعبة..."
     )
 
 
     try:
 
 
-        # =================================================
-        # تشغيل requests خارج Event Loop
-        # =================================================
-
         (
             game_name,
             turkey_price,
             original_price
         ) = await asyncio.to_thread(
-
             get_game_info,
             text
         )
@@ -1267,22 +665,13 @@ async def handle_link(
         )
 
 
-        turkey_price_text = (
-            format_turkish_price(
-                turkey_price
-            )
-        )
-
-
-        store_price_text = (
-            format_store_price(
-                store_price
-            )
+        store_price_text = format_store_price(
+            store_price
         )
 
 
         # =================================================
-        # اللعبة عليها تخفيض
+        # عليها تخفيض
         # =================================================
 
         if (
@@ -1291,41 +680,23 @@ async def handle_link(
         ):
 
 
-            original_price_text = (
-                format_turkish_price(
-                    original_price
-                )
-            )
-
-
             discount_percent = round(
-
                 (
-                    original_price
-                    - turkey_price
+                    (
+                        original_price
+                        - turkey_price
+                    )
+                    / original_price
                 )
-                / original_price
                 * 100
             )
 
 
             result = (
-
                 f"🎮 {game_name}\n\n"
-
                 f"🔥 اللعبة عليها تخفيض!\n\n"
-
                 f"📉 نسبة الخصم: "
                 f"{discount_percent}%\n\n"
-
-                f"❌ السعر الأصلي: "
-                f"{original_price_text} ₺\n"
-
-                f"🇹🇷 السعر الحالي: "
-                f"{turkey_price_text} ₺\n\n"
-
-                f"━━━━━━━━━━━━━━\n\n"
-
                 f"💰 سعر SA STORE: "
                 f"{store_price_text} 🇮🇶"
             )
@@ -1339,14 +710,7 @@ async def handle_link(
 
 
             result = (
-
                 f"🎮 {game_name}\n\n"
-
-                f"🇹🇷 السعر الحالي: "
-                f"{turkey_price_text} ₺\n\n"
-
-                f"━━━━━━━━━━━━━━\n\n"
-
                 f"💰 سعر SA STORE: "
                 f"{store_price_text} 🇮🇶"
             )
@@ -1361,26 +725,14 @@ async def handle_link(
 
 
         print(
-            "\n========== ERROR =========="
-        )
-
-
-        print(
+            "ERROR:",
             repr(error)
         )
 
 
-        print(
-            "===========================\n"
-        )
-
-
         await processing_message.edit_text(
-
             "❌ صار خطأ أثناء جلب معلومات اللعبة.\n\n"
-
-            "جرب رابط ثاني، وإذا تكرر الخطأ "
-            "دزلي صورة من الـ Console."
+            "جرّب رابط ثاني، وإذا تكرر الخطأ دزلي صورة من Deploy Logs."
         )
 
 
@@ -1390,29 +742,22 @@ async def handle_link(
 
 def main():
 
-
     if not BOT_TOKEN:
 
         raise ValueError(
-
             "BOT_TOKEN غير موجود في Variables"
         )
 
 
     app = (
-
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
 
-    # =====================================================
     # START
-    # =====================================================
-
     app.add_handler(
-
         CommandHandler(
             "start",
             start
@@ -1420,17 +765,11 @@ def main():
     )
 
 
-    # =====================================================
     # استقبال الروابط
-    # =====================================================
-
     app.add_handler(
-
         MessageHandler(
-
             filters.TEXT
             & ~filters.COMMAND,
-
             handle_link
         )
     )
@@ -1441,7 +780,9 @@ def main():
     )
 
 
-    app.run_polling()
+    app.run_polling(
+        drop_pending_updates=True
+    )
 
 
 # =========================================================
@@ -1449,5 +790,4 @@ def main():
 # =========================================================
 
 if __name__ == "__main__":
-
     main()
