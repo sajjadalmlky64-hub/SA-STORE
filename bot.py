@@ -699,6 +699,7 @@ async def handle_link(
                 f"{discount_percent}%\n\n"
                 f"💰 سعر: "
                 f"{store_price_text} 🇮🇶"
+                f" @Sijadsa "
             )
 
 
