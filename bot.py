@@ -713,7 +713,9 @@ async def handle_link(
                 f"🎮 {game_name}\n\n"
                 f"💰 سعر: "
                 f"{store_price_text} 🇮🇶"
+           f"@Sijadsa" 
             )
+        
 
 
         await processing_message.edit_text(
