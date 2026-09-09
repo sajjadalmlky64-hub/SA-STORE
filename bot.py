@@ -715,7 +715,8 @@ async def handle_link(
                 f"💰 سعر: "
                 f"{store_price_text} 🇮🇶"
 
-                f" لطلب شراء "
+
+                
                 f"@Sijadsa" 
             )
         
