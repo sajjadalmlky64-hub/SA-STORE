@@ -48,11 +48,7 @@ def calculate_price(price):
     elif price <= 200:
         return 10000
 
-    # من 201 إلى 225 = 11 ألف
-    elif price <= 225:
-        return 11000
-
-    # من 226 إلى 249 = 11 ألف
+    # من 201 إلى 249 = 11 ألف
     elif price <= 249:
         return 11000
 
@@ -261,6 +257,7 @@ def find_all_prices(data, prices=None):
                     find_all_prices(value, prices)
 
             elif isinstance(value, (dict, list)):
+
                 find_all_prices(value, prices)
 
     elif isinstance(data, list):
@@ -382,33 +379,42 @@ def get_discount_end_time(url):
 
         html = get_store_page(url)
 
-        # إزالة HTML بشكل مبسط
-        text = re.sub(
-            r"<[^>]+>",
-            " ",
-            html
-        )
+        # محاولة فك النصوص المشفرة
+        try:
 
-        text = (
-            text.replace("&nbsp;", " ")
-            .replace("\\u0131", "ı")
-            .replace("\\u00fc", "ü")
-            .replace("\\u015f", "ş")
-            .replace("\\u011f", "ğ")
-            .replace("\\u00f6", "ö")
-            .replace("\\u00e7", "ç")
-        )
+            decoded_html = bytes(
+                html,
+                "utf-8"
+            ).decode(
+                "unicode_escape",
+                errors="ignore"
+            )
 
-        text = re.sub(
+        except Exception:
+
+            decoded_html = html
+
+
+        # البحث بالنسختين
+        search_text = html + " " + decoded_html
+
+
+        # تنظيف المسافات
+        search_text = re.sub(
             r"\s+",
             " ",
-            text
+            search_text
         )
 
-        # مثال:
-        # 1 gün içinde sona eriyor
 
-        patterns = [
+        # ==================================
+        # البحث عن عدد الأيام
+        # ==========================================
+
+        day_patterns = [
+
+            # مثال:
+            # 1 gün içinde sona eriyor
 
             r"(\d+)\s*gün\s*içinde\s*sona\s*eriyor",
 
@@ -417,61 +423,110 @@ def get_discount_end_time(url):
             r"gün\s*(\d+)\s*içinde\s*sona\s*eriyor",
 
             r"gun\s*(\d+)\s*icinde\s*sona\s*eriyor",
+
+            r"(\d+)\s*gün.{0,100}?sona\s*eriyor",
+
+            r"(\d+)\s*gun.{0,100}?sona\s*eriyor",
         ]
 
-        for pattern in patterns:
+
+        for pattern in day_patterns:
 
             match = re.search(
                 pattern,
-                text,
+                search_text,
                 re.IGNORECASE
             )
 
             if match:
 
-                days = int(match.group(1))
-
-                if days == 1:
-                    return "ينتهي التخفيض خلال يوم واحد ⏳"
-
-                return (
-                    f"ينتهي التخفيض خلال "
-                    f"{days} أيام ⏳"
+                days = int(
+                    match.group(1)
                 )
 
-        # حالات بالساعات
+                if days == 0:
+
+                    return (
+                        "ينتهي التخفيض اليوم ⏳"
+                    )
+
+                elif days == 1:
+
+                    return (
+                        "ينتهي التخفيض خلال يوم واحد ⏳"
+                    )
+
+                else:
+
+                    return (
+                        f"ينتهي التخفيض خلال "
+                        f"{days} أيام ⏳"
+                    )
+
+
+        # ==================================
+        # البحث عن الساعات
+        # ==========================================
 
         hour_patterns = [
 
             r"(\d+)\s*saat\s*içinde\s*sona\s*eriyor",
 
+            r"(\d+)\s*saat.{0,100}?sona\s*eriyor",
+
             r"saat\s*(\d+)\s*içinde\s*sona\s*eriyor",
         ]
+
 
         for pattern in hour_patterns:
 
             match = re.search(
                 pattern,
-                text,
+                search_text,
                 re.IGNORECASE
             )
 
             if match:
 
-                hours = int(match.group(1))
+                hours = int(
+                    match.group(1)
+                )
+
+                if hours == 1:
+
+                    return (
+                        "ينتهي التخفيض خلال ساعة واحدة ⏳"
+                    )
 
                 return (
                     f"ينتهي التخفيض خلال "
                     f"{hours} ساعة ⏳"
                 )
 
+
+        # ==================================
+        # حالة ينتهي اليوم
+        # ==========================================
+
+        if re.search(
+            r"bugün.*sona\s*eriyor",
+            search_text,
+            re.IGNORECASE
+        ):
+
+            return (
+                "ينتهي التخفيض اليوم ⏳"
+            )
+
+
         return None
+
 
     except Exception as error:
 
         print(
             "DISCOUNT END ERROR:",
-            error
+            repr(error)
         )
 
         return None
@@ -514,13 +569,19 @@ def get_game_info(url):
             "ماكدر أطلع Product ID من الرابط"
         )
 
+
+    # جلب معلومات اللعبة
     product = get_product_data(product_id)
 
     game_name = get_game_name(product)
 
     prices = []
 
+
+    # ==================================
     # Microsoft Purchase API
+    # ==========================================
+
     try:
 
         api_prices = get_prices_from_api(
@@ -537,7 +598,10 @@ def get_game_info(url):
         )
 
 
+    # ==================================
     # Product Data
+    # ==========================================
+
     try:
 
         product_prices = find_all_prices(
@@ -554,7 +618,10 @@ def get_game_info(url):
         )
 
 
+    # ==================================
     # صفحة Xbox
+    # ==========================================
+
     try:
 
         page_prices = get_prices_from_store_page(
@@ -571,19 +638,24 @@ def get_game_info(url):
         )
 
 
+    # تنظيف الأسعار
     prices = [
         price
         for price in prices
         if price and price > 0
     ]
 
+
     prices = sorted(
         list(set(prices))
     )
 
+
+    # تحديد السعر الحالي والأصلي
     current_price, original_price = (
         determine_prices(prices)
     )
+
 
     if not current_price:
 
@@ -592,7 +664,10 @@ def get_game_info(url):
         )
 
 
-    # مدة انتهاء التخفيض
+    # ==================================
+    # جلب مدة انتهاء التخفيض
+    # ==========================================
+
     discount_end = None
 
     if (
@@ -636,6 +711,7 @@ def format_store_price(price):
     thousands = price // 1000
 
     if price % 1000 == 0:
+
         return f"{thousands} ألف"
 
     return (
@@ -659,7 +735,9 @@ async def start(
         "وأجيبلك معلوماتها وسعر SA STORE 💰"
     )
 
-    await update.message.reply_text(message)
+    await update.message.reply_text(
+        message
+    )
 
 
 # ==========================================
@@ -672,6 +750,7 @@ async def handle_link(
 ):
 
     text = update.message.text.strip()
+
 
     if "xbox.com" not in text.lower():
 
@@ -698,6 +777,7 @@ async def handle_link(
         ) = get_game_info(text)
 
 
+        # حساب سعر المتجر
         store_price = calculate_price(
             turkey_price
         )
@@ -719,12 +799,13 @@ async def handle_link(
 
         # ==================================
         # اللعبة عليها تخفيض
-        # ==================================
+        # ==========================================
 
         if (
             original_price
             and original_price > turkey_price
         ):
+
 
             original_price_text = (
                 format_turkish_price(
@@ -757,7 +838,10 @@ async def handle_link(
             )
 
 
-            # إضافة مدة انتهاء التخفيض
+            # ==================================
+            # إضافة وقت انتهاء التخفيض
+            # ==========================================
+
             if discount_end:
 
                 result += (
@@ -773,8 +857,8 @@ async def handle_link(
 
 
         # ==================================
-        # بدون تخفيض
-        # ==================================
+        # اللعبة بدون تخفيض
+        # ==========================================
 
         else:
 
@@ -799,6 +883,7 @@ async def handle_link(
             "ERROR:",
             repr(error)
         )
+
 
         await processing_message.edit_text(
             "❌ صار خطأ أثناء جلب معلومات اللعبة.\n\n"
@@ -826,6 +911,7 @@ def main():
     )
 
 
+    # أمر Start
     app.add_handler(
         CommandHandler(
             "start",
@@ -834,6 +920,7 @@ def main():
     )
 
 
+    # استقبال الروابط
     app.add_handler(
         MessageHandler(
             filters.TEXT
