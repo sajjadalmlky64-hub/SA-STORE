@@ -601,7 +601,7 @@ async def start(
 
     await update.message.reply_text(
         "🎮 أرسل رابط أي لعبة من Xbox Store\n\n"
-        "وأطلعلك سعر SA STORE 💰🇮🇶"
+        " وأطلعلك سعر"
     )
 
 
@@ -697,7 +697,7 @@ async def handle_link(
                 f"🔥 اللعبة عليها تخفيض!\n\n"
                 f"📉 نسبة الخصم: "
                 f"{discount_percent}%\n\n"
-                f"💰 سعر SA STORE: "
+                f"💰 سعر: "
                 f"{store_price_text} 🇮🇶"
             )
 
@@ -711,7 +711,7 @@ async def handle_link(
 
             result = (
                 f"🎮 {game_name}\n\n"
-                f"💰 سعر SA STORE: "
+                f"💰 سعر: "
                 f"{store_price_text} 🇮🇶"
             )
 
