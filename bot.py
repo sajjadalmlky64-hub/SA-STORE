@@ -738,7 +738,7 @@ async def handle_link(
 
         await processing_message.edit_text(
             "❌ صار خطأ أثناء جلب معلومات اللعبة.\n\n"
-            "جرّب رابط ثاني، وإذا تكرر الخطأ دزلي صورة من Deploy Logs."
+             
         )
 
 
