@@ -29,6 +29,16 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN غير موجود في Variables")
+
+
+# =========================================================
+# ADMIN CHAT ID
+# =========================================================
+
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+
 
 # =========================================================
 # HEADERS
@@ -66,6 +76,7 @@ def init_database():
 
     cursor = connection.cursor()
 
+    # تنبيهات الأسعار
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +88,20 @@ def init_database():
             old_price INTEGER NOT NULL,
             active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # آخر لعبة أرسلها كل مستخدم
+    # حتى نعرف الرابط الأصلي عند الضغط على الأزرار
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS last_requests (
+            user_id INTEGER NOT NULL,
+            product_id TEXT NOT NULL,
+            game_name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            current_price INTEGER NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, product_id)
         )
     """)
 
@@ -324,7 +349,7 @@ def get_game_name(product):
 
 
 # =========================================================
-# استخراج الأسعار من Display Catalog
+# استخراج الأسعار
 # =========================================================
 
 def get_prices_from_catalog(product):
@@ -454,9 +479,11 @@ def determine_best_price(price_pairs):
         if original is not None:
 
             if original <= current:
+
                 original = None
 
             elif original > 50000:
+
                 original = None
 
             else:
@@ -467,6 +494,7 @@ def determine_best_price(price_pairs):
                 ) * 100
 
                 if discount >= 99:
+
                     original = None
 
         valid_pairs.append(
@@ -478,10 +506,6 @@ def determine_best_price(price_pairs):
 
     if not valid_pairs:
         return None, None
-
-    # =====================================================
-    # تخفيض حقيقي
-    # =====================================================
 
     discounted = []
 
@@ -512,6 +536,510 @@ def determine_best_price(price_pairs):
             set(discounted)
         )
 
+        unique.sort(
+            key=lambda x: x[0]
+        )
+
+        return unique[0]
+
+    prices = []
+
+    for current, original in valid_pairs:
+
+        prices.append(
+            round(current, 2)
+        )
+
+    if not prices:
+        return None, None
+
+    counter = Counter(prices)
+
+    best_price = counter.most_common(1)[0][0]
+
+    return best_price, None
+
+
+# =========================================================
+# جلب معلومات اللعبة
+# =========================================================
+
+def get_game_info(url):
+
+    product_id = get_product_id(url)
+
+    if not product_id:
+
+        raise Exception(
+            "ماكدر أطلع Product ID من الرابط"
+        )
+
+    product = get_product_data(
+        product_id
+    )
+
+    game_name = get_game_name(
+        product
+    )
+
+    price_pairs = get_prices_from_catalog(
+        product
+    )
+
+    current_price, original_price = (
+        determine_best_price(
+            price_pairs
+        )
+    )
+
+    if current_price is None:
+
+        raise Exception(
+            "Microsoft لم يعثر على سعر اللعبة"
+        )
+
+    return (
+        product_id,
+        game_name,
+        current_price,
+        original_price
+    )
+
+
+# =========================================================
+# تنسيق السعر العراقي
+# =========================================================
+
+def format_store_price(price):
+
+    price = int(price)
+
+    if price % 1000 == 0:
+
+        return f"{price // 1000} ألف"
+
+    return (
+        f"{price:,} دينار"
+        .replace(",", ".")
+    )
+
+
+# =========================================================
+# رابط التواصل
+# =========================================================
+
+ORDER_URL = "https://t.me/Sijadsa"
+
+
+# =========================================================
+# حفظ آخر طلب/لعبة للمستخدم
+# =========================================================
+
+def save_last_request(
+    user_id,
+    product_id,
+    game_name,
+    url,
+    current_price
+):
+
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO last_requests
+        (
+            user_id,
+            product_id,
+            game_name,
+            url,
+            current_price,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+        (
+            user_id,
+            product_id,
+            game_name,
+            url,
+            int(current_price)
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+
+# =========================================================
+# جلب آخر طلب
+# =========================================================
+
+def get_last_request(
+    user_id,
+    product_id
+):
+
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            game_name,
+            url,
+            current_price
+        FROM last_requests
+        WHERE user_id = ?
+        AND product_id = ?
+        LIMIT 1
+        """,
+        (
+            user_id,
+            product_id
+        )
+    )
+
+    result = cursor.fetchone()
+
+    connection.close()
+
+    return result
+
+
+# =========================================================
+# أزرار اللعبة
+# =========================================================
+
+def get_game_keyboard(
+    product_id,
+    alert_is_active=False
+):
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                "🛒 اطلب الآن",
+                callback_data=f"order:{product_id}"
+            )
+        ]
+    ]
+
+    if alert_is_active:
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "🔕 إلغاء التنبيه",
+                    callback_data=f"cancel:{product_id}"
+                )
+            ]
+        )
+
+    else:
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "🔔 نبهني إذا نزل السعر",
+                    callback_data=f"alert:{product_id}"
+                )
+            ]
+        )
+
+    return InlineKeyboardMarkup(
+        buttons
+    )
+
+
+# =========================================================
+# فحص هل التنبيه موجود
+# =========================================================
+
+def alert_exists(
+    user_id,
+    product_id
+):
+
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM alerts
+        WHERE user_id = ?
+        AND product_id = ?
+        AND active = 1
+        LIMIT 1
+        """,
+        (
+            user_id,
+            product_id
+        )
+    )
+
+    result = cursor.fetchone()
+
+    connection.close()
+
+    return result is not None
+
+
+# =========================================================
+# إضافة تنبيه
+# =========================================================
+
+def add_alert(
+    user_id,
+    chat_id,
+    product_id,
+    game_name,
+    url,
+    old_price
+):
+
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM alerts
+        WHERE user_id = ?
+        AND product_id = ?
+        AND active = 1
+        LIMIT 1
+        """,
+        (
+            user_id,
+            product_id
+        )
+    )
+
+    existing = cursor.fetchone()
+
+    if existing:
+
+        connection.close()
+
+        return False
+
+    cursor.execute(
+        """
+        INSERT INTO alerts
+        (
+            user_id,
+            chat_id,
+            product_id,
+            game_name,
+            url,
+            old_price,
+            active
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            user_id,
+            chat_id,
+            product_id,
+            game_name,
+            url,
+            int(old_price)
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+    return True
+
+
+# =========================================================
+# إلغاء تنبيه
+# =========================================================
+
+def cancel_alert(
+    user_id,
+    product_id
+):
+
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE alerts
+        SET active = 0
+        WHERE user_id = ?
+        AND product_id = ?
+        AND active = 1
+        """,
+        (
+            user_id,
+            product_id
+        )
+    )
+
+    changed = cursor.rowcount
+
+    connection.commit()
+    connection.close()
+
+    return changed > 0
+
+
+# =========================================================
+# جلب التنبيهات الفعالة
+# =========================================================
+
+def get_active_alerts():
+
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            user_id,
+            chat_id,
+            product_id,
+            game_name,
+            url,
+            old_price
+        FROM alerts
+        WHERE active = 1
+        """
+    )
+
+    rows = cursor.fetchall()
+
+    connection.close()
+
+    return rows
+
+
+# =========================================================
+# إيقاف تنبيه
+# =========================================================
+
+def deactivate_alert(alert_id):
+
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE alerts
+        SET active = 0
+        WHERE id = ?
+        """,
+        (
+            alert_id,
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+
+# =========================================================
+# فحص جميع التنبيهات
+# =========================================================
+
+async def check_price_alerts(app):
+
+    print("Checking price alerts...")
+
+    alerts = get_active_alerts()
+
+    if not alerts:
+
+        print("No active alerts.")
+
+        return
+
+    for alert in alerts:
+
+        (
+            alert_id,
+            user_id,
+            chat_id,
+            product_id,
+            game_name,
+            url,
+            old_price
+        ) = alert
+
+        try:
+
+            (
+                new_product_id,
+                new_game_name,
+                turkey_price,
+                original_price
+            ) = await asyncio.to_thread(
+                get_game_info,
+                url
+            )
+
+            new_store_price = calculate_price(
+                turkey_price
+            )
+
+            if new_store_price < old_price:
+
+                old_price_text = format_store_price(
+                    old_price
+                )
+
+                new_price_text = format_store_price(
+                    new_store_price
+                )
+
+                message = (
+                    "🚨 <b>انخفض سعر اللعبة!</b>\n\n"
+                    f"🎮 <b>{new_game_name}</b>\n\n"
+                    f"💰 السعر السابق: "
+                    f"<b>{old_price_text}</b> 🇮🇶\n"
+                    f"🔥 السعر الجديد: "
+                    f"<b>{new_price_text}</b> 🇮🇶\n\n"
+                    "🛒 تقدر تطلبها الآن"
+                )
+
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🛒 اطلب الآن",
+                            callback_data=f"order:{product_id}"
+                        )
+                    ]
+                ])
+
+                await app.bot.send_me
         unique.sort(
             key=lambda x: x[0]
         )
