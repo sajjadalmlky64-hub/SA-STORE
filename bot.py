@@ -58,6 +58,9 @@ SESSION.headers.update(HEADERS)
 # كاش دائم داخل تشغيل البوت لنتائج البحث
 SEARCH_RESULT_CACHE = {}
 
+# آخر قائمة نتائج بحث لكل مستخدم، حتى نقدر نرجع لها بعد اختيار إصدار.
+SEARCH_SELECTIONS = {}
+
 
 # =========================================================
 # قاعدة البيانات
@@ -1182,7 +1185,8 @@ def get_remaining_text(end_date):
 
 def get_game_keyboard(
     product_id,
-    active
+    active,
+    show_back=False
 ):
 
     buttons = [
@@ -1216,6 +1220,17 @@ def get_game_keyboard(
             ]
         )
 
+    if show_back:
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "🔙 رجوع للإصدارات",
+                    callback_data="backsearch"
+                )
+            ]
+        )
+
     return InlineKeyboardMarkup(
         buttons
     )
@@ -1232,7 +1247,8 @@ def create_game_result(
     turkey_price,
     original_price,
     end_date,
-    reference
+    reference,
+    show_back=False
 ):
 
     store_price = calculate_price(
@@ -1326,7 +1342,8 @@ def create_game_result(
         alert_exists(
             user.id,
             product_id
-        )
+        ),
+        show_back
     )
 
     return message, keyboard
@@ -1540,6 +1557,12 @@ async def handle_message(
         # =================================================
         # أكثر من نتيجة
         # =================================================
+
+        # نحفظ آخر قائمة نتائج لهذا المستخدم حتى يقدر يرجع لها
+        # بعد فتح أي إصدار.
+        SEARCH_SELECTIONS[update.effective_user.id] = list(
+            valid_results
+        )
 
         buttons = []
 
@@ -1773,7 +1796,8 @@ async def button_handler(
                 turkey_price,
                 original_price,
                 end_date,
-                f"xboxid:{resolved_product_id}"
+                f"xboxid:{resolved_product_id}",
+                show_back=True
             )
 
             await query.edit_message_text(
@@ -1794,6 +1818,55 @@ async def button_handler(
                 "❌ ماكدرت أجيب سعر اللعبة، "
                 "حاول مرة ثانية."
             )
+
+        return
+
+    # =====================================================
+    # الرجوع إلى قائمة إصدارات اللعبة
+    # =====================================================
+
+    if data == "backsearch":
+
+        results = SEARCH_SELECTIONS.get(
+            user_id
+        )
+
+        if not results:
+
+            await query.answer(
+                "❌ قائمة الإصدارات غير متوفرة، ابحث عن اللعبة مرة ثانية.",
+                show_alert=True
+            )
+
+            return
+
+        buttons = []
+
+        for result_product_id, result_name in results:
+
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"🎮 {result_name[:50]}",
+                        callback_data=(
+                            f"searchselect:{result_product_id}"
+                        )
+                    )
+                ]
+            )
+
+        await query.answer(
+            "🔙 رجعناك لقائمة الإصدارات"
+        )
+
+        await query.edit_message_text(
+            "🔍 <b>لكيت أكثر من نتيجة:</b>\n\n"
+            "اختار اللعبة المطلوبة 👇",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                buttons
+            )
+        )
 
         return
 
