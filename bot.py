@@ -1324,7 +1324,7 @@ def create_game_result(
     keyboard = get_game_keyboard(
         product_id,
         alert_exists(
-            update.effective_user.id,
+            user.id,
             product_id
         )
     )
