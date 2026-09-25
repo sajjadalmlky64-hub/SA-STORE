@@ -1239,8 +1239,19 @@ def create_game_result(
         turkey_price
     )
 
+    # create_game_result() يُستخدم من الرسائل العادية ومن ضغط الأزرار.
+    # في الرسالة العادية يكون لدينا Update.effective_user،
+    # أما CallbackQuery فالمستخدم موجود في from_user.
+    user = getattr(update, "effective_user", None)
+
+    if user is None:
+        user = getattr(update, "from_user", None)
+
+    if user is None:
+        raise Exception("ماكدرت أحدد المستخدم")
+
     save_last_request(
-        update.effective_user.id,
+        user.id,
         product_id,
         game_name,
         reference,
