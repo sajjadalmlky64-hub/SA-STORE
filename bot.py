@@ -55,6 +55,9 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
+# تخزين نتائج البحث التي تم التأكد أن لها سعر
+SEARCH_RESULT_CACHE = {}
+
 
 # =========================================================
 # قاعدة البيانات
@@ -1290,10 +1293,6 @@ async def handle_message(
 
     try:
 
-        # =================================================
-        # رابط Xbox
-        # =================================================
-
         if "xbox.com" in text.lower():
 
             (
@@ -1325,10 +1324,6 @@ async def handle_message(
 
             return
 
-        # =================================================
-        # اسم اللعبة
-        # =================================================
-
         results = await asyncio.to_thread(
             search_xbox_games,
             text,
@@ -1345,13 +1340,56 @@ async def handle_message(
 
             return
 
-        # =================================================
-        # نتيجة واحدة
-        # =================================================
+        # نفحص كل نتيجة قبل عرضها.
+        # بعض نتائج Microsoft تكون Editions أو Add-ons
+        # وما يكون إلها سعر مباشر، لذلك ما نخليها تظهر
+        # كزر حتى ما يفشل المستخدم عند الضغط عليها.
 
-        if len(results) == 1:
+        valid_results = []
 
-            product_id, result_name = results[0]
+        for product_id, result_name in results:
+
+            try:
+
+                info = await asyncio.to_thread(
+                    get_game_info_by_product_id,
+                    product_id
+                )
+
+                SEARCH_RESULT_CACHE[
+                    product_id
+                ] = info
+
+                valid_results.append(
+                    (
+                        product_id,
+                        result_name
+                    )
+                )
+
+            except Exception as error:
+
+                print(
+                    "SEARCH RESULT SKIPPED:",
+                    product_id,
+                    result_name,
+                    repr(error)
+                )
+
+        if not valid_results:
+
+            await processing.edit_text(
+                "❌ لكيت نتائج للعبة، "
+                "لكن Microsoft ما رجّع سعر متاح إلها حالياً.\n\n"
+                "جرب اسم اللعبة مرة ثانية "
+                "أو أرسل رابط Xbox Store."
+            )
+
+            return
+
+        if len(valid_results) == 1:
+
+            product_id, result_name = valid_results[0]
 
             (
                 product_id,
@@ -1359,10 +1397,9 @@ async def handle_message(
                 turkey_price,
                 original_price,
                 end_date
-            ) = await asyncio.to_thread(
-                get_game_info_by_product_id,
+            ) = SEARCH_RESULT_CACHE[
                 product_id
-            )
+            ]
 
             message, keyboard = create_game_result(
                 update,
@@ -1382,13 +1419,9 @@ async def handle_message(
 
             return
 
-        # =================================================
-        # أكثر من نتيجة
-        # =================================================
-
         buttons = []
 
-        for product_id, result_name in results:
+        for product_id, result_name in valid_results:
 
             buttons.append(
                 [
@@ -1581,7 +1614,7 @@ async def button_handler(
         product_id = data.split(
             ":",
             1
-        )[1]
+        )[1].upper()
 
         await query.answer(
             "⏳ جاري جلب السعر..."
@@ -1589,16 +1622,30 @@ async def button_handler(
 
         try:
 
+            # البيانات تم فحصها مسبقاً أثناء البحث،
+            # لذلك نستخدمها مباشرة عند الضغط.
+            info = SEARCH_RESULT_CACHE.get(
+                product_id
+            )
+
+            if info is None:
+
+                info = await asyncio.to_thread(
+                    get_game_info_by_product_id,
+                    product_id
+                )
+
+                SEARCH_RESULT_CACHE[
+                    product_id
+                ] = info
+
             (
                 product_id,
                 game_name,
                 turkey_price,
                 original_price,
                 end_date
-            ) = await asyncio.to_thread(
-                get_game_info_by_product_id,
-                product_id
-            )
+            ) = info
 
             message, keyboard = create_game_result(
                 query,
@@ -1620,6 +1667,7 @@ async def button_handler(
 
             print(
                 "SEARCH SELECT ERROR:",
+                product_id,
                 repr(error)
             )
 
