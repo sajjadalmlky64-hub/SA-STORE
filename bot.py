@@ -35,28 +35,31 @@ ORDER_URL = "https://t.me/Sijadsa"
 MARKET = "TR"
 LANGUAGES = "tr-TR,en-US"
 
-STRONG_DEAL_MIN_DISCOUNT = 50
-
-# تحديث العروض كل 30 دقيقة
-DEALS_UPDATE_SECONDS = 1800
-
-# عدد الألعاب التي نطلبها من قائمة العروض
-DEALS_FETCH_COUNT = 200
-
-# عدد الألعاب التي نعرضها للمستخدم
-DEALS_DISPLAY_COUNT = 15
-
 DB_FILE = "price_alerts.db"
 
 
 # =========================================================
-# GLOBAL DATA
+# PRICE BROWSE SETTINGS
 # =========================================================
 
-STRONG_DEALS_CACHE = []
-STRONG_DEALS_UPDATED_AT = None
+# تحديث قاعدة الألعاب كل 6 ساعات
+PRICE_GAMES_CACHE_SECONDS = 21600
 
-STRONG_DEALS_LOCK = asyncio.Lock()
+PRICE_GAMES_CACHE = []
+PRICE_GAMES_UPDATED_AT = None
+
+PRICE_GAMES_LOCK = asyncio.Lock()
+
+
+# قوائم Xbox التي نستخدمها للحصول على الألعاب
+PRICE_LISTS = [
+    "Computed/TopPaid",
+    "Computed/MostPlayed",
+    "Computed/BestRated",
+    "Computed/New",
+]
+
+PRICE_LIST_COUNT = 150
 
 
 # =========================================================
@@ -64,6 +67,7 @@ STRONG_DEALS_LOCK = asyncio.Lock()
 # =========================================================
 
 def init_db():
+
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
 
@@ -102,6 +106,7 @@ def init_db():
 # =========================================================
 
 def calculate_price(price):
+
     price = float(price)
 
     if price <= 25:
@@ -142,6 +147,7 @@ def calculate_price(price):
 
 
 def format_store_price(price):
+
     price = int(price)
 
     if price % 1000 == 0:
@@ -155,10 +161,10 @@ def format_store_price(price):
 # =========================================================
 
 def extract_product_id(url):
+
     if not url:
         return None
 
-    # Xbox Store IDs عادة 12 حرف/رقم
     patterns = [
         r"/([0-9A-Za-z]{12})(?:[/?#]|$)",
         r"[?&]cid=([0-9A-Za-z]{12})",
@@ -166,6 +172,7 @@ def extract_product_id(url):
     ]
 
     for pattern in patterns:
+
         match = re.search(pattern, url)
 
         if match:
@@ -175,16 +182,20 @@ def extract_product_id(url):
 
 
 # =========================================================
-# HTTP
+# HTTP JSON
 # =========================================================
 
-def http_get_json(url, params=None, timeout=25):
+def http_get_json(
+    url,
+    params=None,
+    timeout=30
+):
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 "
             "(Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
             "Chrome/140 Safari/537.36"
         ),
         "Accept": "application/json",
@@ -203,11 +214,15 @@ def http_get_json(url, params=None, timeout=25):
 
 
 # =========================================================
-# MICROSOFT DISPLAY CATALOG
+# GET PRODUCT
 # =========================================================
 
 def get_product_data(product_id):
-    url = "https://displaycatalog.mp.microsoft.com/v7.0/products"
+
+    url = (
+        "https://displaycatalog.mp.microsoft.com/"
+        "v7.0/products"
+    )
 
     params = {
         "bigIds": product_id,
@@ -218,9 +233,16 @@ def get_product_data(product_id):
     }
 
     try:
-        data = http_get_json(url, params=params)
 
-        products = data.get("Products", [])
+        data = http_get_json(
+            url,
+            params=params
+        )
+
+        products = data.get(
+            "Products",
+            []
+        )
 
         if not products:
             return None
@@ -228,80 +250,59 @@ def get_product_data(product_id):
         return products[0]
 
     except Exception as e:
-        print("PRODUCT ERROR:", product_id, e)
+
+        print(
+            "PRODUCT ERROR:",
+            product_id,
+            repr(e)
+        )
+
         return None
 
 
 # =========================================================
-# HELPERS FOR PRODUCT DATA
+# GET PRODUCTS BATCH
 # =========================================================
 
-def find_numbers_by_key(obj, wanted_keys, result=None):
-    if result is None:
-        result = []
+def get_products_batch(product_ids):
 
-    if isinstance(obj, dict):
-        for key, value in obj.items():
+    if not product_ids:
+        return []
 
-            key_lower = str(key).lower()
+    url = (
+        "https://displaycatalog.mp.microsoft.com/"
+        "v7.0/products"
+    )
 
-            if key_lower in wanted_keys:
-                if isinstance(value, (int, float)):
-                    result.append(float(value))
+    params = {
+        "bigIds": ",".join(product_ids),
+        "market": MARKET,
+        "languages": LANGUAGES,
+        "fieldsTemplate": "Details",
+        "actionFilter": "Browse",
+    }
 
-                elif isinstance(value, str):
-                    try:
-                        result.append(float(value))
-                    except:
-                        pass
+    try:
 
-            find_numbers_by_key(
-                value,
-                wanted_keys,
-                result
-            )
+        data = http_get_json(
+            url,
+            params=params,
+            timeout=45
+        )
 
-    elif isinstance(obj, list):
-        for item in obj:
-            find_numbers_by_key(
-                item,
-                wanted_keys,
-                result
-            )
+        return data.get(
+            "Products",
+            []
+        )
 
-    return result
+    except Exception as e:
 
+        print(
+            "BATCH PRODUCT ERROR:",
+            repr(e)
+        )
 
-def find_dates_by_key(obj, wanted_keys, result=None):
-    if result is None:
-        result = []
-
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-
-            key_lower = str(key).lower()
-
-            if key_lower in wanted_keys:
-
-                if isinstance(value, str):
-                    if "T" in value or "-" in value:
-                        result.append(value)
-
-            find_dates_by_key(
-                value,
-                wanted_keys,
-                result
-            )
-
-    elif isinstance(obj, list):
-        for item in obj:
-            find_dates_by_key(
-                item,
-                wanted_keys,
-                result
-            )
-
-    return result
+        return []
 
 
 # =========================================================
@@ -309,8 +310,13 @@ def find_dates_by_key(obj, wanted_keys, result=None):
 # =========================================================
 
 def get_game_name(product):
+
     try:
-        localized = product.get("LocalizedProperties", [])
+
+        localized = product.get(
+            "LocalizedProperties",
+            []
+        )
 
         if localized:
 
@@ -319,18 +325,10 @@ def get_game_name(product):
             if first.get("ProductTitle"):
                 return first["ProductTitle"]
 
-            description = first.get("ProductDescription", {})
-
-            if isinstance(description, dict):
-                title = description.get("Title")
-
-                if title:
-                    return title
-
     except:
         pass
 
-    return "لعبة Xbox"
+    return "Xbox Game"
 
 
 # =========================================================
@@ -338,10 +336,6 @@ def get_game_name(product):
 # =========================================================
 
 def get_price_info(product):
-    """
-    نحاول استخراج السعر الحالي والسعر الأصلي
-    من DisplaySkuAvailabilities.
-    """
 
     availabilities = product.get(
         "DisplaySkuAvailabilities",
@@ -352,71 +346,118 @@ def get_price_info(product):
 
     for availability in availabilities:
 
-        # فقط العناصر التي عندها سعر
-        numbers_list = []
-
-        # أسعار محتملة
-        current_values = find_numbers_by_key(
-            availability,
-            {
-                "listprice",
-                "saleprice",
-                "currentprice",
-                "retailprice",
-                "price",
-            }
+        sku = availability.get(
+            "Sku",
+            {}
         )
 
-        original_values = find_numbers_by_key(
-            availability,
-            {
-                "msrp",
-                "originalprice",
-                "regularprice",
-            }
-        )
+        # -----------------------------------------
+        # الطريقة الأساسية
+        # -----------------------------------------
 
-        if current_values:
-            current = min(
-                x for x in current_values
-                if x >= 0
+        price = None
+        original = None
+
+        try:
+
+            price_obj = (
+                sku.get("LocalizedProperties", [])
             )
 
-            candidates.append(
-                {
-                    "current": current,
-                    "original": (
-                        max(original_values)
-                        if original_values
-                        else None
-                    ),
-                    "availability": availability,
-                }
-            )
+        except:
+            price_obj = []
+
+        # -----------------------------------------
+        # بحث recursive عن الأسعار
+        # -----------------------------------------
+
+        def walk(obj):
+
+            nonlocal price
+            nonlocal original
+
+            if isinstance(obj, dict):
+
+                for key, value in obj.items():
+
+                    key_lower = str(key).lower()
+
+                    if key_lower in {
+                        "listprice",
+                        "saleprice",
+                        "currentprice",
+                    }:
+
+                        try:
+
+                            number = float(value)
+
+                            if number >= 0:
+
+                                if price is None:
+                                    price = number
+
+                        except:
+                            pass
+
+                    if key_lower in {
+                        "msrp",
+                        "originalprice",
+                        "regularprice",
+                    }:
+
+                        try:
+
+                            number = float(value)
+
+                            if number > 0:
+                                original = number
+
+                        except:
+                            pass
+
+                    walk(value)
+
+            elif isinstance(obj, list):
+
+                for item in obj:
+                    walk(item)
+
+        walk(availability)
+
+        if price is not None:
+
+            candidates.append({
+                "current": price,
+                "original": original,
+                "availability": availability,
+            })
 
     if not candidates:
         return None
 
-    # نحاول اختيار المرشح الذي لديه تخفيض حقيقي
-    for candidate in candidates:
+    # نفضل السعر الذي لديه MSRP أعلى
+    for item in candidates:
 
-        current = candidate["current"]
-        original = candidate["original"]
+        current = item["current"]
+        original = item["original"]
 
         if (
             original is not None
             and original > current
-            and original > 0
         ):
-            return current, original, candidate["availability"]
+            return (
+                current,
+                original,
+                item["availability"]
+            )
 
-    # إذا ماكو MSRP واضح
-    candidate = candidates[0]
+    item = candidates[0]
 
     return (
-        candidate["current"],
-        candidate["original"],
-        candidate["availability"],
+        item["current"],
+        item["original"],
+        item["availability"]
     )
 
 
@@ -425,34 +466,47 @@ def get_price_info(product):
 # =========================================================
 
 def extract_expiry(availability):
+
     if not availability:
         return None
 
-    dates = find_dates_by_key(
-        availability,
-        {
-            "enddate",
-            "endDate".lower(),
-        }
+    found = []
+
+    def walk(obj):
+
+        if isinstance(obj, dict):
+
+            for key, value in obj.items():
+
+                if str(key).lower() == "enddate":
+
+                    if isinstance(value, str):
+                        found.append(value)
+
+                walk(value)
+
+        elif isinstance(obj, list):
+
+            for item in obj:
+                walk(item)
+
+    walk(availability)
+
+    now = datetime.now(
+        timezone.utc
     )
 
-    if not dates:
-        return None
+    future = []
 
-    future_dates = []
-
-    now = datetime.now(timezone.utc)
-
-    for date_string in dates:
+    for value in found:
 
         try:
-            normalized = date_string.replace(
-                "Z",
-                "+00:00"
-            )
 
             dt = datetime.fromisoformat(
-                normalized
+                value.replace(
+                    "Z",
+                    "+00:00"
+                )
             )
 
             if dt.tzinfo is None:
@@ -461,22 +515,29 @@ def extract_expiry(availability):
                 )
 
             if dt > now:
-                future_dates.append(dt)
+                future.append(dt)
 
         except:
-            continue
+            pass
 
-    if not future_dates:
+    if not future:
         return None
 
-    return min(future_dates)
+    return min(future)
 
+
+# =========================================================
+# REMAINING TIME
+# =========================================================
 
 def get_remaining_text(expiry):
+
     if not expiry:
         return "غير محدد"
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
     if expiry <= now:
         return "انتهى التخفيض"
@@ -496,43 +557,54 @@ def get_remaining_text(expiry):
     parts = []
 
     if days:
-        parts.append(f"{days} يوم")
+        parts.append(
+            f"{days} يوم"
+        )
 
     if hours:
-        parts.append(f"{hours} ساعة")
+        parts.append(
+            f"{hours} ساعة"
+        )
 
     if minutes:
-        parts.append(f"{minutes} دقيقة")
+        parts.append(
+            f"{minutes} دقيقة"
+        )
 
-    if not parts:
-        return "أقل من دقيقة"
-
-    return " ".join(parts)
+    return (
+        " ".join(parts)
+        if parts
+        else "أقل من دقيقة"
+    )
 
 
 # =========================================================
 # DISCOUNT
 # =========================================================
 
-def calculate_discount(current, original):
+def calculate_discount(
+    current,
+    original
+):
 
-    if not original or original <= 0:
+    if not original:
         return 0
 
-    if current >= original:
+    if original <= current:
         return 0
 
-    discount = (
-        (original - current)
-        / original
-        * 100
+    return int(
+        round(
+            (
+                (original - current)
+                / original
+            ) * 100
+        )
     )
-
-    return int(round(discount))
 
 
 # =========================================================
-# SAVE LAST REQUEST
+# LAST REQUEST
 # =========================================================
 
 def save_last_request(
@@ -540,7 +612,7 @@ def save_last_request(
     product_id,
     game_name,
     url,
-    current_price,
+    current_price
 ):
 
     conn = sqlite3.connect(DB_FILE)
@@ -570,7 +642,9 @@ def save_last_request(
         game_name,
         url,
         current_price,
-        datetime.now(timezone.utc).isoformat(),
+        datetime.now(
+            timezone.utc
+        ).isoformat(),
     ))
 
     conn.commit()
@@ -578,10 +652,13 @@ def save_last_request(
 
 
 # =========================================================
-# CHECK ACTIVE ALERT
+# ACTIVE ALERT
 # =========================================================
 
-def has_active_alert(user_id, product_id):
+def has_active_alert(
+    user_id,
+    product_id
+):
 
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -606,76 +683,49 @@ def has_active_alert(user_id, product_id):
 
 
 # =========================================================
-# GAME MESSAGE
-# =========================================================
-
-def build_game_message(
-    game_name,
-    discount,
-    expiry,
-    current_iqd,
-):
-    text = f"🎮 {game_name}\n\n"
-
-    if discount > 0:
-
-        text += "🔥 اللعبة عليها تخفيض!\n"
-        text += f"📉 نسبة الخصم: {discount}%\n"
-
-        if expiry:
-            expiry_text = expiry.strftime(
-                "%Y-%m-%d الساعة %H:%M"
-            )
-
-            text += f"⏳ ينتهي التخفيض: {expiry_text}\n"
-            text += (
-                f"📅 متبقي: "
-                f"{get_remaining_text(expiry)}\n"
-            )
-
-    text += (
-        f"\n💰 سعر اللعبة: "
-        f"{format_store_price(current_iqd)} 🇮🇶"
-    )
-
-    return text
-
-
-# =========================================================
 # START
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     keyboard = [
         [
             InlineKeyboardButton(
-                "🔥 العروض القوية",
-                callback_data="strong_deals"
+                "🎯 ألعاب حسب السعر",
+                callback_data="price_games"
             )
         ]
     ]
 
     await update.message.reply_text(
         "يرجى إرسال رابط اللعبة من Xbox Store 👇",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
     )
 
 
 # =========================================================
-# ID COMMAND
+# ID
 # =========================================================
 
-async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def get_id(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
-        f"🆔 Telegram ID:\n`{update.effective_user.id}`",
+        f"🆔 Telegram ID:\n"
+        f"`{update.effective_user.id}`",
         parse_mode="Markdown"
     )
 
 
 # =========================================================
-# GAME URL
+# NORMAL GAME URL
 # =========================================================
 
 async def handle_game_url(
@@ -685,7 +735,9 @@ async def handle_game_url(
 
     text = update.message.text.strip()
 
-    product_id = extract_product_id(text)
+    product_id = extract_product_id(
+        text
+    )
 
     if not product_id:
 
@@ -699,7 +751,10 @@ async def handle_game_url(
         "⏳ جاري جلب معلومات اللعبة..."
     )
 
-    product = get_product_data(product_id)
+    product = await asyncio.to_thread(
+        get_product_data,
+        product_id
+    )
 
     if not product:
 
@@ -709,9 +764,13 @@ async def handle_game_url(
 
         return
 
-    game_name = get_game_name(product)
+    game_name = get_game_name(
+        product
+    )
 
-    price_info = get_price_info(product)
+    price_info = get_price_info(
+        product
+    )
 
     if not price_info:
 
@@ -726,13 +785,13 @@ async def handle_game_url(
     original_price = price_info[1]
     availability = price_info[2]
 
+    current_iqd = calculate_price(
+        current_price
+    )
+
     discount = calculate_discount(
         current_price,
         original_price
-    )
-
-    current_iqd = calculate_price(
-        current_price
     )
 
     expiry = extract_expiry(
@@ -744,21 +803,41 @@ async def handle_game_url(
         product_id,
         game_name,
         text,
-        current_iqd,
+        current_iqd
     )
 
-    message = build_game_message(
-        game_name,
-        discount,
-        expiry,
-        current_iqd,
+    message = (
+        f"🎮 {game_name}\n\n"
+    )
+
+    if discount > 0:
+
+        message += (
+            "🔥 اللعبة عليها تخفيض!\n"
+            f"📉 نسبة الخصم: {discount}%\n"
+        )
+
+        if expiry:
+
+            message += (
+                f"⏳ ينتهي التخفيض: "
+                f"{expiry.strftime('%Y-%m-%d الساعة %H:%M')}\n"
+                f"📅 متبقي: "
+                f"{get_remaining_text(expiry)}\n"
+            )
+
+    message += (
+        f"\n💰 سعر اللعبة: "
+        f"{format_store_price(current_iqd)} 🇮🇶"
     )
 
     buttons = [
         [
             InlineKeyboardButton(
                 "🛒 اطلب الآن",
-                callback_data=f"order:{product_id}"
+                callback_data=(
+                    f"order:{product_id}"
+                )
             )
         ]
     ]
@@ -771,7 +850,9 @@ async def handle_game_url(
         buttons.append([
             InlineKeyboardButton(
                 "🔕 إلغاء التنبيه",
-                callback_data=f"cancel:{product_id}"
+                callback_data=(
+                    f"cancel:{product_id}"
+                )
             )
         ])
 
@@ -780,31 +861,32 @@ async def handle_game_url(
         buttons.append([
             InlineKeyboardButton(
                 "🔔 نبهني إذا نزل السعر",
-                callback_data=f"alert:{product_id}"
+                callback_data=(
+                    f"alert:{product_id}"
+                )
             )
         ])
 
     buttons.append([
         InlineKeyboardButton(
-            "🔥 العروض القوية",
-            callback_data="strong_deals"
+            "🎯 ألعاب حسب السعر",
+            callback_data="price_games"
         )
     ])
 
     await update.message.reply_text(
         message,
-        reply_markup=InlineKeyboardMarkup(buttons)
+        reply_markup=InlineKeyboardMarkup(
+            buttons
+        )
     )
 
 
 # =========================================================
-# DEAL API
+# GET PRODUCT IDS FROM XBOX LIST
 # =========================================================
 
-def extract_product_ids(obj):
-    """
-    استخراج Xbox Product IDs من أي شكل JSON.
-    """
+def extract_ids_from_list(data):
 
     found = set()
 
@@ -816,63 +898,54 @@ def extract_product_ids(obj):
         "id",
     }
 
-    def walk(value, parent_key=""):
+    def walk(obj):
 
-        if isinstance(value, dict):
+        if isinstance(obj, dict):
 
-            for key, child in value.items():
+            for key, value in obj.items():
 
-                key_lower = str(key).lower()
+                key_lower = str(
+                    key
+                ).lower()
 
                 if key_lower in valid_keys:
 
-                    if isinstance(child, str):
+                    if isinstance(value, str):
 
-                        candidate = child.strip()
+                        value = value.strip()
 
                         if re.fullmatch(
                             r"[0-9A-Za-z]{12}",
-                            candidate
+                            value
                         ):
                             found.add(
-                                candidate.upper()
+                                value.upper()
                             )
 
-                walk(child, key_lower)
+                walk(value)
 
-        elif isinstance(value, list):
+        elif isinstance(obj, list):
 
-            for item in value:
-                walk(item, parent_key)
+            for item in obj:
+                walk(item)
 
-        elif isinstance(value, str):
-
-            # فقط إذا كنا داخل سياق ID
-            if parent_key in valid_keys:
-
-                if re.fullmatch(
-                    r"[0-9A-Za-z]{12}",
-                    value.strip()
-                ):
-                    found.add(
-                        value.strip().upper()
-                    )
-
-    walk(obj)
+    walk(data)
 
     return list(found)
 
 
 # =========================================================
-# GET DEAL IDs
+# GET IDS FROM XBOX LIST
 # =========================================================
 
-def get_deal_product_ids():
+def get_ids_from_xbox_list(
+    list_name
+):
 
-    endpoint = (
+    url = (
         "https://reco-public.rec.mp.microsoft.com/"
         "channels/Reco/V8.0/Lists/api/list/"
-        "Computed/Deal"
+        + list_name
     )
 
     params = {
@@ -880,92 +953,10 @@ def get_deal_product_ids():
         "language": "tr-tr",
         "itemType": "Game",
         "deviceFamily": "Windows.Xbox",
-        "count": str(DEALS_FETCH_COUNT),
+        "count": str(
+            PRICE_LIST_COUNT
+        ),
         "skipItems": "0",
-    }
-
-    print("🔥 Getting Xbox Deal list...")
-
-    try:
-
-        response = requests.get(
-            endpoint,
-            params=params,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-            },
-            timeout=30,
-        )
-
-        print(
-            "🔥 Deal API status:",
-            response.status_code
-        )
-
-        if response.status_code != 200:
-
-            print(
-                "🔥 Deal API response:",
-                response.text[:1000]
-            )
-
-            return []
-
-        data = response.json()
-
-        ids = extract_product_ids(data)
-
-        print(
-            "🔥 Product IDs found:",
-            len(ids)
-        )
-
-        if not ids:
-
-            if isinstance(data, dict):
-                print(
-                    "🔥 Deal top keys:",
-                    list(data.keys())[:30]
-                )
-
-            print(
-                "🔥 Deal response sample:",
-                str(data)[:2000]
-            )
-
-        return ids
-
-    except Exception as e:
-
-        print(
-            "DEAL ENDPOINT ERROR:",
-            repr(e)
-        )
-
-        return []
-
-
-# =========================================================
-# FETCH PRODUCTS IN BATCHES
-# =========================================================
-
-def get_products_batch(product_ids):
-
-    if not product_ids:
-        return []
-
-    url = (
-        "https://displaycatalog.mp.microsoft.com/"
-        "v7.0/products"
-    )
-
-    params = {
-        "bigIds": ",".join(product_ids),
-        "market": MARKET,
-        "languages": LANGUAGES,
-        "fieldsTemplate": "Details",
-        "actionFilter": "Browse",
     }
 
     try:
@@ -977,30 +968,29 @@ def get_products_batch(product_ids):
                 "User-Agent": "Mozilla/5.0",
                 "Accept": "application/json",
             },
-            timeout=40,
+            timeout=30,
+        )
+
+        print(
+            "PRICE LIST:",
+            list_name,
+            response.status_code
         )
 
         if response.status_code != 200:
-
-            print(
-                "🔥 DisplayCatalog error:",
-                response.status_code,
-                response.text[:500]
-            )
-
             return []
 
         data = response.json()
 
-        return data.get(
-            "Products",
-            []
+        return extract_ids_from_list(
+            data
         )
 
     except Exception as e:
 
         print(
-            "BATCH PRODUCT ERROR:",
+            "PRICE LIST ERROR:",
+            list_name,
             repr(e)
         )
 
@@ -1008,391 +998,626 @@ def get_products_batch(product_ids):
 
 
 # =========================================================
-# REFRESH STRONG DEALS
+# BUILD PRICE GAMES CACHE
 # =========================================================
 
-async def refresh_strong_deals():
+async def refresh_price_games():
 
-    global STRONG_DEALS_CACHE
-    global STRONG_DEALS_UPDATED_AT
+    global PRICE_GAMES_CACHE
+    global PRICE_GAMES_UPDATED_AT
 
-    async with STRONG_DEALS_LOCK:
+    async with PRICE_GAMES_LOCK:
 
-        try:
-
-            print("================================")
-            print("🔥 Updating strong deals...")
-            print("================================")
-
-            product_ids = await asyncio.to_thread(
-                get_deal_product_ids
-            )
-
-            if not product_ids:
-
-                print(
-                    "⚠️ No product IDs received."
-                )
-
-                # لا نمسح العروض القديمة
-                # إذا فشل المصدر مؤقتاً
-                return
-
-            deals = []
-
-            # نستخدم batches صغيرة حتى ما يصير
-            # request طويل جداً
-            batch_size = 20
-
-            for i in range(
-                0,
-                len(product_ids),
-                batch_size
-            ):
-
-                batch_ids = product_ids[
-                    i:i + batch_size
-                ]
-
-                print(
-                    f"🔥 Batch: "
-                    f"{i + 1}-"
-                    f"{i + len(batch_ids)}"
-                )
-
-                products = await asyncio.to_thread(
-                    get_products_batch,
-                    batch_ids
-                )
-
-                print(
-                    "🔥 Products:",
-                    len(products)
-                )
-
-                for product in products:
-
-                    try:
-
-                        product_id = (
-                            product.get("ProductId")
-                            or product.get("Id")
-                        )
-
-                        if not product_id:
-                            continue
-
-                        game_name = get_game_name(
-                            product
-                        )
-
-                        price_info = get_price_info(
-                            product
-                        )
-
-                        if not price_info:
-                            continue
-
-                        current_price = (
-                            price_info[0]
-                        )
-
-                        original_price = (
-                            price_info[1]
-                        )
-
-                        availability = (
-                            price_info[2]
-                        )
-
-                        discount = calculate_discount(
-                            current_price,
-                            original_price
-                        )
-
-                        if discount < STRONG_DEAL_MIN_DISCOUNT:
-                            continue
-
-                        expiry = extract_expiry(
-                            availability
-                        )
-
-                        # إذا انتهى التخفيض
-                        if expiry:
-
-                            now = datetime.now(
-                                timezone.utc
-                            )
-
-                            if expiry <= now:
-                                continue
-
-                        current_iqd = calculate_price(
-                            current_price
-                        )
-
-                        deals.append({
-                            "product_id": product_id,
-                            "name": game_name,
-                            "discount": discount,
-                            "current_price": current_price,
-                            "original_price": original_price,
-                            "iqd_price": current_iqd,
-                            "expiry": expiry,
-                        })
-
-                    except Exception as e:
-
-                        print(
-                            "🔥 Deal product parse error:",
-                            repr(e)
-                        )
-
-            # ترتيب حسب أعلى خصم
-            deals.sort(
-                key=lambda x: (
-                    x["discount"],
-                    -x["iqd_price"]
-                ),
-                reverse=True
-            )
-
-            # إزالة التكرار
-            unique = []
-            seen = set()
-
-            for deal in deals:
-
-                pid = deal["product_id"]
-
-                if pid in seen:
-                    continue
-
-                seen.add(pid)
-                unique.append(deal)
-
-            if unique:
-
-                STRONG_DEALS_CACHE = unique[
-                    :DEALS_DISPLAY_COUNT
-                ]
-
-                STRONG_DEALS_UPDATED_AT = (
-                    datetime.now(timezone.utc)
-                )
-
-                print(
-                    "🔥 Strong deals:",
-                    len(STRONG_DEALS_CACHE)
-                )
-
-            else:
-
-                print(
-                    "⚠️ No 50%+ deals found."
-                )
-
-                # لا نمسح الكاش القديم
-                # حتى ما يختفي القسم إذا API تعطل مؤقتاً
-
-        except Exception as e:
-
-            print(
-                "STRONG DEALS UPDATE ERROR:",
-                repr(e)
-            )
-
-
-# =========================================================
-# DEALS MESSAGE
-# =========================================================
-
-def build_deals_message():
-
-    if not STRONG_DEALS_CACHE:
-
-        return (
-            "🔥 العروض القوية\n\n"
-            "حالياً ماكو عروض قوية متاحة.\n\n"
-            "🔄 يتم تحديث القسم تلقائياً كل 30 دقيقة."
+        print(
+            "🎯 Updating price games..."
         )
 
-    text = (
-        "🔥 العروض القوية\n\n"
-        "الألعاب اللي عليها تخفيض 50% أو أكثر:\n\n"
+        all_ids = []
+
+        for list_name in PRICE_LISTS:
+
+            ids = await asyncio.to_thread(
+                get_ids_from_xbox_list,
+                list_name
+            )
+
+            print(
+                "🎯",
+                list_name,
+                "=>",
+                len(ids)
+            )
+
+            all_ids.extend(ids)
+
+        # إزالة التكرار
+        unique_ids = []
+
+        seen = set()
+
+        for product_id in all_ids:
+
+            if product_id in seen:
+                continue
+
+            seen.add(product_id)
+
+            unique_ids.append(
+                product_id
+            )
+
+        print(
+            "🎯 Total unique IDs:",
+            len(unique_ids)
+        )
+
+        games = []
+
+        # دفعات
+        batch_size = 20
+
+        for i in range(
+            0,
+            len(unique_ids),
+            batch_size
+        ):
+
+            batch_ids = unique_ids[
+                i:i + batch_size
+            ]
+
+            products = await asyncio.to_thread(
+                get_products_batch,
+                batch_ids
+            )
+
+            print(
+                "🎯 Batch:",
+                i,
+                "Products:",
+                len(products)
+            )
+
+            for product in products:
+
+                try:
+
+                    product_id = (
+                        product.get("ProductId")
+                        or product.get("Id")
+                    )
+
+                    if not product_id:
+                        continue
+
+                    name = get_game_name(
+                        product
+                    )
+
+                    price_info = get_price_info(
+                        product
+                    )
+
+                    if not price_info:
+                        continue
+
+                    current_price = (
+                        price_info[0]
+                    )
+
+                    original_price = (
+                        price_info[1]
+                    )
+
+                    availability = (
+                        price_info[2]
+                    )
+
+                    iqd_price = calculate_price(
+                        current_price
+                    )
+
+                    discount = calculate_discount(
+                        current_price,
+                        original_price
+                    )
+
+                    expiry = extract_expiry(
+                        availability
+                    )
+
+                    # إذا التخفيض منتهي، نتجاهله
+                    if expiry:
+
+                        now = datetime.now(
+                            timezone.utc
+                        )
+
+                        if expiry <= now:
+                            discount = 0
+
+                    games.append({
+                        "product_id": product_id,
+                        "name": name,
+                        "iqd_price": iqd_price,
+                        "discount": discount,
+                        "expiry": expiry,
+                    })
+
+                except Exception as e:
+
+                    print(
+                        "PRICE GAME PARSE ERROR:",
+                        repr(e)
+                    )
+
+        # إزالة الألعاب المكررة
+        unique_games = []
+        seen_ids = set()
+
+        for game in games:
+
+            pid = game[
+                "product_id"
+            ]
+
+            if pid in seen_ids:
+                continue
+
+            seen_ids.add(pid)
+
+            unique_games.append(
+                game
+            )
+
+        if unique_games:
+
+            PRICE_GAMES_CACHE = (
+                unique_games
+            )
+
+            PRICE_GAMES_UPDATED_AT = (
+                datetime.now(
+                    timezone.utc
+                )
+            )
+
+            print(
+                "🎯 Cached games:",
+                len(PRICE_GAMES_CACHE)
+            )
+
+        else:
+
+            print(
+                "⚠️ No games received."
+            )
+
+
+# =========================================================
+# PRICE RANGE
+# =========================================================
+
+def get_price_range(
+    range_id
+):
+
+    ranges = {
+
+        "under5": (
+            0,
+            5000,
+            "أقل من 5,000 د.ع"
+        ),
+
+        "5to10": (
+            5000,
+            10000,
+            "5,000 - 10,000 د.ع"
+        ),
+
+        "10to15": (
+            10000,
+            15000,
+            "10,000 - 15,000 د.ع"
+        ),
+
+        "15to20": (
+            15000,
+            20000,
+            "15,000 - 20,000 د.ع"
+        ),
+
+        "20to30": (
+            20000,
+            30000,
+            "20,000 - 30,000 د.ع"
+        ),
+
+        "over30": (
+            30000,
+            999999999,
+            "أكثر من 30,000 د.ع"
+        ),
+    }
+
+    return ranges.get(
+        range_id
     )
 
-    for index, deal in enumerate(
-        STRONG_DEALS_CACHE,
+
+# =========================================================
+# PRICE GAMES MENU
+# =========================================================
+
+async def show_price_menu(
+    query
+):
+
+    keyboard = [
+
+        [
+            InlineKeyboardButton(
+                "💰 أقل من 5,000",
+                callback_data="range:under5"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "💰 5,000 - 10,000",
+                callback_data="range:5to10"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "💰 10,000 - 15,000",
+                callback_data="range:10to15"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "💰 15,000 - 20,000",
+                callback_data="range:15to20"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "💰 20,000 - 30,000",
+                callback_data="range:20to30"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "💰 أكثر من 30,000",
+                callback_data="range:over30"
+            )
+        ],
+    ]
+
+    await query.edit_message_text(
+        "🎯 ألعاب حسب السعر\n\n"
+        "اختار ميزانيتك:",
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
+    )
+
+
+# =========================================================
+# SHOW GAMES BY RANGE
+# =========================================================
+
+async def show_games_by_range(
+    query,
+    range_id
+):
+
+    global PRICE_GAMES_UPDATED_AT
+
+    price_range = get_price_range(
+        range_id
+    )
+
+    if not price_range:
+
+        await query.answer(
+            "❌ اختيار غير صحيح.",
+            show_alert=True
+        )
+
+        return
+
+    minimum = price_range[0]
+    maximum = price_range[1]
+    title = price_range[2]
+
+    # تحديث الكاش إذا قديم
+    needs_update = False
+
+    if not PRICE_GAMES_CACHE:
+        needs_update = True
+
+    elif PRICE_GAMES_UPDATED_AT:
+
+        age = (
+            datetime.now(
+                timezone.utc
+            )
+            - PRICE_GAMES_UPDATED_AT
+        ).total_seconds()
+
+        if age >= PRICE_GAMES_CACHE_SECONDS:
+            needs_update = True
+
+    if needs_update:
+
+        await query.edit_message_text(
+            "⏳ جاري جلب الألعاب والأسعار...\n"
+            "قد يستغرق الأمر قليلاً أول مرة."
+        )
+
+        await refresh_price_games()
+
+    matching = []
+
+    for game in PRICE_GAMES_CACHE:
+
+        price = game[
+            "iqd_price"
+        ]
+
+        if (
+            price >= minimum
+            and price <= maximum
+        ):
+            matching.append(game)
+
+    # ترتيب من الأرخص للأغلى
+    matching.sort(
+        key=lambda x: (
+            x["iqd_price"],
+            x["name"].lower()
+        )
+    )
+
+    # نعرض أول 30
+    matching = matching[:30]
+
+    if not matching:
+
+        keyboard = [[
+            InlineKeyboardButton(
+                "🔙 رجوع",
+                callback_data="price_games"
+            )
+        ]]
+
+        await query.edit_message_text(
+            f"🎯 {title}\n\n"
+            "حالياً ماكدرت ألقى ألعاب ضمن هذا السعر.",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
+
+        return
+
+    text = (
+        f"🎯 ألعاب {title}\n\n"
+    )
+
+    for index, game in enumerate(
+        matching,
         start=1
     ):
 
         text += (
-            f"{index}. 🎮 {deal['name']}\n"
-            f"📉 خصم {deal['discount']}%\n"
-            f"💰 {format_store_price(deal['iqd_price'])} 🇮🇶\n"
+            f"{index}. 🎮 {game['name']}\n"
+            f"💰 {format_store_price(game['iqd_price'])} 🇮🇶\n"
         )
 
-        if deal["expiry"]:
+        if game["discount"] > 0:
 
             text += (
-                f"⏳ متبقي: "
-                f"{get_remaining_text(deal['expiry'])}\n"
+                f"🔥 خصم {game['discount']}%\n"
             )
 
         text += "\n"
 
     text += (
-        "🔄 يتم تحديث العروض تلقائياً كل 30 دقيقة."
+        f"📋 عدد النتائج: {len(matching)}"
     )
 
-    return text
+    keyboard = []
 
+    # زر لكل لعبة
+    for game in matching:
 
-# =========================================================
-# DEALS KEYBOARD
-# =========================================================
-
-def build_deals_keyboard():
-
-    buttons = []
-
-    for deal in STRONG_DEALS_CACHE:
-
-        name = deal["name"]
+        name = game["name"]
 
         if len(name) > 35:
             name = name[:32] + "..."
 
-        buttons.append([
+        keyboard.append([
             InlineKeyboardButton(
                 f"🎮 {name}",
                 callback_data=(
-                    f"deal:{deal['product_id']}"
+                    f"pricegame:{game['product_id']}"
+                )
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "🔙 تغيير الميزانية",
+            callback_data="price_games"
+        )
+    ])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
+    )
+
+
+# =========================================================
+# SHOW SELECTED PRICE GAME
+# =========================================================
+
+async def show_price_game(
+    query,
+    product_id
+):
+
+    product = await asyncio.to_thread(
+        get_product_data,
+        product_id
+    )
+
+    if not product:
+
+        await query.answer(
+            "❌ اللعبة لم تعد متوفرة.",
+            show_alert=True
+        )
+
+        return
+
+    game_name = get_game_name(
+        product
+    )
+
+    price_info = get_price_info(
+        product
+    )
+
+    if not price_info:
+
+        await query.answer(
+            "❌ ماكدرت أجيب السعر.",
+            show_alert=True
+        )
+
+        return
+
+    current_price = price_info[0]
+    original_price = price_info[1]
+    availability = price_info[2]
+
+    current_iqd = calculate_price(
+        current_price
+    )
+
+    discount = calculate_discount(
+        current_price,
+        original_price
+    )
+
+    expiry = extract_expiry(
+        availability
+    )
+
+    text = (
+        f"🎮 {game_name}\n\n"
+    )
+
+    if discount > 0:
+
+        text += (
+            "🔥 اللعبة عليها تخفيض!\n"
+            f"📉 نسبة الخصم: {discount}%\n"
+        )
+
+        if expiry:
+
+            text += (
+                f"⏳ ينتهي التخفيض: "
+                f"{expiry.strftime('%Y-%m-%d الساعة %H:%M')}\n"
+                f"📅 متبقي: "
+                f"{get_remaining_text(expiry)}\n"
+            )
+
+    text += (
+        f"\n💰 سعر اللعبة: "
+        f"{format_store_price(current_iqd)} 🇮🇶"
+    )
+
+    # نخزنها حتى يشتغل الطلب والتنبيه
+    user_id = query.from_user.id
+
+    xbox_url = (
+        f"https://www.xbox.com/tr-TR/"
+        f"games/store/{product_id}"
+    )
+
+    save_last_request(
+        user_id,
+        product_id,
+        game_name,
+        xbox_url,
+        current_iqd
+    )
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                "🛒 اطلب الآن",
+                callback_data=(
+                    f"order:{product_id}"
+                )
+            )
+        ]
+    ]
+
+    if has_active_alert(
+        user_id,
+        product_id
+    ):
+
+        buttons.append([
+            InlineKeyboardButton(
+                "🔕 إلغاء التنبيه",
+                callback_data=(
+                    f"cancel:{product_id}"
+                )
+            )
+        ])
+
+    else:
+
+        buttons.append([
+            InlineKeyboardButton(
+                "🔔 نبهني إذا نزل السعر",
+                callback_data=(
+                    f"alert:{product_id}"
                 )
             )
         ])
 
     buttons.append([
         InlineKeyboardButton(
-            "🔄 تحديث العروض",
-            callback_data="refresh_deals"
+            "🔙 رجوع للأسعار",
+            callback_data="price_games"
         )
     ])
 
-    return InlineKeyboardMarkup(buttons)
-
-
-# =========================================================
-# SHOW STRONG DEALS
-# =========================================================
-
-async def show_strong_deals(
-    query,
-    force_refresh=False
-):
-
-    global STRONG_DEALS_UPDATED_AT
-
-    should_refresh = force_refresh
-
-    if STRONG_DEALS_UPDATED_AT is None:
-        should_refresh = True
-
-    else:
-
-        age = (
-            datetime.now(timezone.utc)
-            - STRONG_DEALS_UPDATED_AT
-        ).total_seconds()
-
-        if age >= DEALS_UPDATE_SECONDS:
-            should_refresh = True
-
-    if should_refresh:
-
-        await refresh_strong_deals()
-
-    await query.edit_message_text(
-        build_deals_message(),
-        reply_markup=build_deals_keyboard()
-    )
-
-
-# =========================================================
-# DEAL DETAILS
-# =========================================================
-
-async def show_deal_details(
-    query,
-    product_id
-):
-
-    deal = None
-
-    for item in STRONG_DEALS_CACHE:
-
-        if item["product_id"] == product_id:
-            deal = item
-            break
-
-    if not deal:
-
-        await query.answer(
-            "العرض انتهى أو تم تحديث القائمة.",
-            show_alert=True
-        )
-
-        return
-
-    text = (
-        f"🎮 {deal['name']}\n\n"
-        f"🔥 تخفيض قوي!\n"
-        f"📉 نسبة الخصم: {deal['discount']}%\n\n"
-        f"💰 سعر اللعبة: "
-        f"{format_store_price(deal['iqd_price'])} 🇮🇶\n"
-    )
-
-    if deal["expiry"]:
-
-        text += (
-            f"⏳ ينتهي التخفيض: "
-            f"{deal['expiry'].strftime('%Y-%m-%d الساعة %H:%M')}\n"
-            f"📅 متبقي: "
-            f"{get_remaining_text(deal['expiry'])}\n"
-        )
-
-    text += "\n🔥 العرض متوفر حالياً."
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🛒 اطلب الآن",
-                callback_data=f"deal_order:{product_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔔 نبهني إذا نزل السعر",
-                callback_data=f"deal_alert:{product_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔙 رجوع للعروض",
-                callback_data="strong_deals"
-            )
-        ]
-    ]
-
     await query.edit_message_text(
         text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(
+            buttons
+        )
     )
 
 
 # =========================================================
-# CALLBACKS
+# CALLBACK HANDLER
 # =========================================================
 
 async def callback_handler(
@@ -1406,196 +1631,57 @@ async def callback_handler(
 
     data = query.data
 
-    # -----------------------------------------
-    # Strong deals
-    # -----------------------------------------
+    # =====================================================
+    # PRICE GAMES
+    # =====================================================
 
-    if data == "strong_deals":
+    if data == "price_games":
 
-        await show_strong_deals(
+        await show_price_menu(
             query
         )
 
         return
 
-    # -----------------------------------------
-    # Refresh deals
-    # -----------------------------------------
+    # =====================================================
+    # PRICE RANGE
+    # =====================================================
 
-    if data == "refresh_deals":
+    if data.startswith("range:"):
 
-        await query.edit_message_text(
-            "⏳ جاري تحديث العروض..."
-        )
+        range_id = data.split(
+            ":",
+            1
+        )[1]
 
-        await refresh_strong_deals()
-
-        await query.edit_message_text(
-            build_deals_message(),
-            reply_markup=build_deals_keyboard()
+        await show_games_by_range(
+            query,
+            range_id
         )
 
         return
 
-    # -----------------------------------------
-    # Deal details
-    # -----------------------------------------
+    # =====================================================
+    # PRICE GAME
+    # =====================================================
 
-    if data.startswith("deal:"):
+    if data.startswith("pricegame:"):
 
         product_id = data.split(
             ":",
             1
         )[1]
 
-        await show_deal_details(
+        await show_price_game(
             query,
             product_id
         )
 
         return
 
-    # -----------------------------------------
-    # Deal order
-    # -----------------------------------------
-
-    if data.startswith("deal_order:"):
-
-        product_id = data.split(
-            ":",
-            1
-        )[1]
-
-        deal = None
-
-        for item in STRONG_DEALS_CACHE:
-
-            if item["product_id"] == product_id:
-                deal = item
-                break
-
-        if not deal:
-
-            await query.answer(
-                "العرض لم يعد متوفر.",
-                show_alert=True
-            )
-
-            return
-
-        user = query.from_user
-
-        username = (
-            f"@{user.username}"
-            if user.username
-            else "بدون يوزرنيم"
-        )
-
-        customer_name = user.full_name
-
-        if ADMIN_CHAT_ID:
-
-            admin_text = (
-                "🛒 طلب جديد!\n\n"
-                f"🎮 اللعبة: {deal['name']}\n"
-                f"💰 السعر: "
-                f"{format_store_price(deal['iqd_price'])} 🇮🇶\n\n"
-                f"👤 الزبون: {customer_name}\n"
-                f"📱 اليوزر: {username}\n"
-                f"🆔 ID: {user.id}\n"
-            )
-
-            try:
-
-                await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=admin_text
-                )
-
-            except Exception as e:
-
-                print(
-                    "ADMIN ORDER ERROR:",
-                    repr(e)
-                )
-
-        await query.message.reply_text(
-            "✅ تم إرسال طلبك.\n\n"
-            "💬 للتواصل وإكمال الطلب:\n"
-            f"{ORDER_URL}"
-        )
-
-        return
-
-    # -----------------------------------------
-    # Deal alert
-    # -----------------------------------------
-
-    if data.startswith("deal_alert:"):
-
-        product_id = data.split(
-            ":",
-            1
-        )[1]
-
-        deal = None
-
-        for item in STRONG_DEALS_CACHE:
-
-            if item["product_id"] == product_id:
-                deal = item
-                break
-
-        if not deal:
-
-            await query.answer(
-                "العرض لم يعد متوفر.",
-                show_alert=True
-            )
-
-            return
-
-        user = query.from_user
-
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-
-        cur.execute("""
-            INSERT INTO alerts
-            (
-                user_id,
-                chat_id,
-                product_id,
-                game_name,
-                url,
-                old_price,
-                active,
-                created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-        """, (
-            user.id,
-            query.message.chat_id,
-            product_id,
-            deal["name"],
-            "",
-            deal["iqd_price"],
-            datetime.now(timezone.utc).isoformat(),
-        ))
-
-        conn.commit()
-        conn.close()
-
-        await query.answer(
-            "🔔 تم تفعيل التنبيه.",
-            show_alert=True
-        )
-
-        return
-
-    # -----------------------------------------
-    # Normal order
-    # -----------------------------------------
+    # =====================================================
+    # NORMAL ORDER
+    # =====================================================
 
     if data.startswith("order:"):
 
@@ -1643,8 +1729,6 @@ async def callback_handler(
             else "بدون يوزرنيم"
         )
 
-        customer_name = user.full_name
-
         if ADMIN_CHAT_ID:
 
             admin_text = (
@@ -1652,7 +1736,7 @@ async def callback_handler(
                 f"🎮 اللعبة: {game_name}\n"
                 f"💰 السعر: "
                 f"{format_store_price(current_price)} 🇮🇶\n\n"
-                f"👤 الزبون: {customer_name}\n"
+                f"👤 الزبون: {user.full_name}\n"
                 f"📱 اليوزر: {username}\n"
                 f"🆔 ID: {user.id}\n"
             )
@@ -1679,9 +1763,9 @@ async def callback_handler(
 
         return
 
-    # -----------------------------------------
-    # Normal alert
-    # -----------------------------------------
+    # =====================================================
+    # ALERT
+    # =====================================================
 
     if data.startswith("alert:"):
 
@@ -1715,7 +1799,7 @@ async def callback_handler(
             conn.close()
 
             await query.answer(
-                "❌ ماكو معلومات محفوظة عن اللعبة.",
+                "❌ ماكو معلومات محفوظة.",
                 show_alert=True
             )
 
@@ -1743,7 +1827,9 @@ async def callback_handler(
             game_name,
             url,
             current_price,
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(
+                timezone.utc
+            ).isoformat(),
         ))
 
         conn.commit()
@@ -1753,13 +1839,17 @@ async def callback_handler(
             [
                 InlineKeyboardButton(
                     "🛒 اطلب الآن",
-                    callback_data=f"order:{product_id}"
+                    callback_data=(
+                        f"order:{product_id}"
+                    )
                 )
             ],
             [
                 InlineKeyboardButton(
                     "🔕 إلغاء التنبيه",
-                    callback_data=f"cancel:{product_id}"
+                    callback_data=(
+                        f"cancel:{product_id}"
+                    )
                 )
             ]
         ]
@@ -1777,9 +1867,9 @@ async def callback_handler(
 
         return
 
-    # -----------------------------------------
-    # Cancel alert
-    # -----------------------------------------
+    # =====================================================
+    # CANCEL ALERT
+    # =====================================================
 
     if data.startswith("cancel:"):
 
@@ -1811,13 +1901,17 @@ async def callback_handler(
             [
                 InlineKeyboardButton(
                     "🛒 اطلب الآن",
-                    callback_data=f"order:{product_id}"
+                    callback_data=(
+                        f"order:{product_id}"
+                    )
                 )
             ],
             [
                 InlineKeyboardButton(
                     "🔔 نبهني إذا نزل السعر",
-                    callback_data=f"alert:{product_id}"
+                    callback_data=(
+                        f"alert:{product_id}"
+                    )
                 )
             ]
         ]
@@ -1837,7 +1931,7 @@ async def callback_handler(
 
 
 # =========================================================
-# PRICE ALERT CHECK
+# ALERT CHECK
 # =========================================================
 
 def get_active_alerts():
@@ -1865,7 +1959,9 @@ def get_active_alerts():
     return rows
 
 
-def deactivate_alert(alert_id):
+def deactivate_alert(
+    alert_id
+):
 
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -1924,10 +2020,8 @@ async def check_price_alerts(
             if not price_info:
                 continue
 
-            current_price = (
-                calculate_price(
-                    price_info[0]
-                )
+            current_price = calculate_price(
+                price_info[0]
             )
 
             if current_price < old_price:
@@ -1941,16 +2035,14 @@ async def check_price_alerts(
                     f"{format_store_price(current_price)} 🇮🇶\n"
                 )
 
-                keyboard = [
-                    [
-                        InlineKeyboardButton(
-                            "🛒 اطلب الآن",
-                            callback_data=(
-                                f"order:{product_id}"
-                            )
+                keyboard = [[
+                    InlineKeyboardButton(
+                        "🛒 اطلب الآن",
+                        callback_data=(
+                            f"order:{product_id}"
                         )
-                    ]
-                ]
+                    )
+                ]]
 
                 await application.bot.send_message(
                     chat_id=chat_id,
@@ -1974,28 +2066,16 @@ async def check_price_alerts(
 
 
 # =========================================================
-# BACKGROUND LOOP
+# BACKGROUND
 # =========================================================
 
 async def background_loop(
     application
 ):
 
-    # أول تحديث بعد تشغيل البوت
-    await asyncio.sleep(10)
+    await asyncio.sleep(60)
 
     while True:
-
-        try:
-
-            await refresh_strong_deals()
-
-        except Exception as e:
-
-            print(
-                "BACKGROUND DEAL ERROR:",
-                repr(e)
-            )
 
         try:
 
@@ -2011,7 +2091,7 @@ async def background_loop(
             )
 
         await asyncio.sleep(
-            DEALS_UPDATE_SECONDS
+            3600
         )
 
 
@@ -2019,19 +2099,44 @@ async def background_loop(
 # POST INIT
 # =========================================================
 
-async def post_init(application):
+async def post_init(
+    application
+):
 
     init_db()
 
-    print("================================")
-    print("🤖 SA STORE BOT STARTED")
-    print("🔥 Strong Deals enabled")
-    print("🔔 Price Alerts enabled")
-    print("🛒 Orders enabled")
-    print("================================")
+    print(
+        "================================"
+    )
+
+    print(
+        "🤖 SA STORE BOT STARTED"
+    )
+
+    print(
+        "🎯 Price Games enabled"
+    )
+
+    print(
+        "🔔 Price Alerts enabled"
+    )
+
+    print(
+        "🛒 Orders enabled"
+    )
+
+    print(
+        "🔥 Strong Deals: NOT INCLUDED"
+    )
+
+    print(
+        "================================"
+    )
 
     application.create_task(
-        background_loop(application)
+        background_loop(
+            application
+        )
     )
 
 
@@ -2081,7 +2186,9 @@ def main():
         )
     )
 
-    print("🚀 Starting polling...")
+    print(
+        "🚀 Starting polling..."
+    )
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
