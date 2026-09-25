@@ -5,6 +5,8 @@ import asyncio
 import sqlite3
 import requests
 
+from datetime import datetime, timezone
+
 from collections import Counter
 
 from telegram import (
@@ -66,7 +68,6 @@ def init_database():
     connection = sqlite3.connect(DB_FILE)
     cursor = connection.cursor()
 
-    # تنبيهات انخفاض السعر
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,8 +82,6 @@ def init_database():
         )
     """)
 
-    # آخر لعبة بحث عنها المستخدم
-    # نحتاجها حتى نعرف الرابط عند الضغط على الأزرار
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS last_requests (
             user_id INTEGER NOT NULL,
@@ -201,9 +200,12 @@ def to_float(value):
     if "," in value and "." in value:
 
         if value.rfind(",") > value.rfind("."):
+
             value = value.replace(".", "")
             value = value.replace(",", ".")
+
         else:
+
             value = value.replace(",", "")
 
     elif "," in value:
@@ -211,9 +213,11 @@ def to_float(value):
         value = value.replace(",", ".")
 
     try:
+
         return float(value)
 
     except Exception:
+
         return None
 
 
@@ -246,11 +250,16 @@ def get_product_data(product_id):
 
     data = response.json()
 
-    products = data.get("Products", [])
+    products = data.get(
+        "Products",
+        []
+    )
 
     if not products:
 
-        product = data.get("Product")
+        product = data.get(
+            "Product"
+        )
 
         if product:
             return product
@@ -275,12 +284,16 @@ def get_game_name(product):
 
     for item in localized:
 
-        title = item.get("ProductTitle")
+        title = item.get(
+            "ProductTitle"
+        )
 
         if title:
             return title
 
-    title = product.get("ProductTitle")
+    title = product.get(
+        "ProductTitle"
+    )
 
     if title:
         return title
@@ -289,7 +302,7 @@ def get_game_name(product):
 
 
 # =========================================================
-# استخراج الأسعار
+# استخراج الأسعار + تاريخ نهاية التخفيض
 # =========================================================
 
 def get_prices_from_catalog(product):
@@ -324,11 +337,15 @@ def get_prices_from_catalog(product):
                 continue
 
             list_price = to_float(
-                price_data.get("ListPrice")
+                price_data.get(
+                    "ListPrice"
+                )
             )
 
             msrp = to_float(
-                price_data.get("MSRP")
+                price_data.get(
+                    "MSRP"
+                )
             )
 
             currency = price_data.get(
@@ -350,12 +367,33 @@ def get_prices_from_catalog(product):
             if list_price <= 0:
                 continue
 
-            if msrp is not None and msrp > list_price:
+            # =================================================
+            # تاريخ نهاية الـ Availability
+            # =================================================
+
+            conditions = availability.get(
+                "Conditions",
+                {}
+            )
+
+            end_date = conditions.get(
+                "EndDate"
+            )
+
+            # =================================================
+            # السعر + MSRP
+            # =================================================
+
+            if (
+                msrp is not None
+                and msrp > list_price
+            ):
 
                 results.append(
                     (
                         list_price,
-                        msrp
+                        msrp,
+                        end_date
                     )
                 )
 
@@ -364,7 +402,8 @@ def get_prices_from_catalog(product):
                 results.append(
                     (
                         list_price,
-                        None
+                        None,
+                        end_date
                     )
                 )
 
@@ -378,15 +417,27 @@ def get_prices_from_catalog(product):
 def determine_best_price(price_pairs):
 
     if not price_pairs:
-        return None, None
+        return None, None, None
 
     valid_pairs = []
 
-    for current, original in price_pairs:
+    for item in price_pairs:
+
+        if len(item) == 3:
+
+            current, original, end_date = item
+
+        else:
+
+            current, original = item
+            end_date = None
 
         try:
+
             current = float(current)
+
         except Exception:
+
             continue
 
         if current <= 0:
@@ -398,16 +449,21 @@ def determine_best_price(price_pairs):
         if original is not None:
 
             try:
+
                 original = float(original)
+
             except Exception:
+
                 original = None
 
         if original is not None:
 
             if original <= current:
+
                 original = None
 
             elif original > 50000:
+
                 original = None
 
             else:
@@ -418,25 +474,27 @@ def determine_best_price(price_pairs):
                 ) * 100
 
                 if discount >= 99:
+
                     original = None
 
         valid_pairs.append(
             (
                 current,
-                original
+                original,
+                end_date
             )
         )
 
     if not valid_pairs:
-        return None, None
+        return None, None, None
 
     # =====================================================
-    # الأسعار المخفضة
+    # التخفيضات الحقيقية
     # =====================================================
 
     discounted = []
 
-    for current, original in valid_pairs:
+    for current, original, end_date in valid_pairs:
 
         if (
             original is not None
@@ -453,49 +511,210 @@ def determine_best_price(price_pairs):
                 discounted.append(
                     (
                         round(current, 2),
-                        round(original, 2)
+                        round(original, 2),
+                        end_date
                     )
                 )
 
     if discounted:
 
-        unique = list(set(discounted))
-
-        unique.sort(
+        # الأقل سعرًا أولاً
+        discounted.sort(
             key=lambda item: item[0]
         )
 
-        return unique[0]
+        return discounted[0]
 
     # =====================================================
-    # السعر بدون تخفيض
+    # بدون تخفيض
     # =====================================================
 
     prices = []
 
-    for current, original in valid_pairs:
+    for current, original, end_date in valid_pairs:
 
         prices.append(
             round(current, 2)
         )
 
     if not prices:
-        return None, None
+        return None, None, None
 
     counter = Counter(prices)
 
     best_price = counter.most_common(1)[0][0]
 
-    return best_price, None
+    # لا يوجد تاريخ تخفيض
+    return best_price, None, None
 
 
 # =========================================================
-# جلب معلومات اللعبة كاملة
+# تحويل تاريخ Microsoft إلى datetime
+# =========================================================
+
+def parse_end_date(end_date):
+
+    if not end_date:
+        return None
+
+    try:
+
+        value = str(end_date).strip()
+
+        # Microsoft قد يرجع 7 خانات للثواني
+        if value.endswith("Z"):
+
+            value = value[:-1] + "+00:00"
+
+        return datetime.fromisoformat(
+            value
+        )
+
+    except Exception as error:
+
+        print(
+            "DATE PARSE ERROR:",
+            end_date,
+            repr(error)
+        )
+
+        return None
+
+
+# =========================================================
+# حساب الوقت المتبقي
+# =========================================================
+
+def get_remaining_text(end_date):
+
+    dt = parse_end_date(
+        end_date
+    )
+
+    if not dt:
+        return None
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    if dt.tzinfo is None:
+
+        dt = dt.replace(
+            tzinfo=timezone.utc
+        )
+
+    else:
+
+        dt = dt.astimezone(
+            timezone.utc
+        )
+
+    remaining = dt - now
+
+    if remaining.total_seconds() <= 0:
+        return None
+
+    total_seconds = int(
+        remaining.total_seconds()
+    )
+
+    days = total_seconds // 86400
+
+    hours = (
+        total_seconds % 86400
+    ) // 3600
+
+    minutes = (
+        total_seconds % 3600
+    ) // 60
+
+    # =====================================================
+    # النص العربي للمدة
+    # =====================================================
+
+    if days > 1:
+
+        remaining_text = (
+            f"متبقي: {days} يوم"
+        )
+
+        if hours > 0:
+
+            remaining_text += (
+                f" و{hours} ساعة"
+            )
+
+    elif days == 1:
+
+        remaining_text = (
+            "متبقي: يوم واحد"
+        )
+
+        if hours > 0:
+
+            remaining_text += (
+                f" و{hours} ساعة"
+            )
+
+    elif hours > 0:
+
+        remaining_text = (
+            f"متبقي: {hours} ساعة"
+        )
+
+        if minutes > 0:
+
+            remaining_text += (
+                f" و{minutes} دقيقة"
+            )
+
+    else:
+
+        remaining_text = (
+            f"متبقي: {max(minutes, 1)} دقيقة"
+        )
+
+    # =====================================================
+    # التاريخ والوقت
+    # نعرضه بتوقيت تركيا لأن العرض من متجر TR
+    # =====================================================
+
+    try:
+
+        local_dt = dt.astimezone(
+            timezone.utc
+        )
+
+        date_text = local_dt.strftime(
+            "%Y-%m-%d"
+        )
+
+        time_text = local_dt.strftime(
+            "%H:%M"
+        )
+
+    except Exception:
+
+        date_text = ""
+        time_text = ""
+
+    return (
+        remaining_text,
+        date_text,
+        time_text
+    )
+
+
+# =========================================================
+# جلب معلومات اللعبة
 # =========================================================
 
 def get_game_info(url):
 
-    product_id = get_product_id(url)
+    product_id = get_product_id(
+        url
+    )
 
     if not product_id:
 
@@ -515,10 +734,12 @@ def get_game_info(url):
         product
     )
 
-    current_price, original_price = (
-        determine_best_price(
-            price_pairs
-        )
+    (
+        current_price,
+        original_price,
+        end_date
+    ) = determine_best_price(
+        price_pairs
     )
 
     if current_price is None:
@@ -531,7 +752,8 @@ def get_game_info(url):
         product_id,
         game_name,
         current_price,
-        original_price
+        original_price,
+        end_date
     )
 
 
@@ -554,7 +776,7 @@ def format_store_price(price):
 
 
 # =========================================================
-# حفظ آخر لعبة بحث عنها المستخدم
+# حفظ آخر طلب
 # =========================================================
 
 def save_last_request(
@@ -565,7 +787,10 @@ def save_last_request(
     current_price
 ):
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -603,7 +828,10 @@ def get_last_request(
     product_id
 ):
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -631,7 +859,7 @@ def get_last_request(
 
 
 # =========================================================
-# هل التنبيه موجود؟
+# فحص التنبيه
 # =========================================================
 
 def alert_exists(
@@ -639,7 +867,10 @@ def alert_exists(
     product_id
 ):
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -677,7 +908,10 @@ def add_alert(
     old_price
 ):
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -700,6 +934,7 @@ def add_alert(
     if existing:
 
         connection.close()
+
         return False
 
     cursor.execute(
@@ -741,7 +976,10 @@ def cancel_alert(
     product_id
 ):
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -767,12 +1005,15 @@ def cancel_alert(
 
 
 # =========================================================
-# جلب التنبيهات
+# التنبيهات الفعالة
 # =========================================================
 
 def get_active_alerts():
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -801,9 +1042,14 @@ def get_active_alerts():
 # إيقاف التنبيه
 # =========================================================
 
-def deactivate_alert(alert_id):
+def deactivate_alert(
+    alert_id
+):
 
-    connection = sqlite3.connect(DB_FILE)
+    connection = sqlite3.connect(
+        DB_FILE
+    )
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -812,7 +1058,9 @@ def deactivate_alert(alert_id):
         SET active = 0
         WHERE id = ?
         """,
-        (alert_id,)
+        (
+            alert_id,
+        )
     )
 
     connection.commit()
@@ -859,22 +1107,31 @@ def get_game_keyboard(
             ]
         )
 
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(
+        buttons
+    )
 
 
 # =========================================================
 # فحص انخفاض الأسعار
 # =========================================================
 
-async def check_price_alerts(app):
+async def check_price_alerts(
+    app
+):
 
-    print("Checking price alerts...")
+    print(
+        "Checking price alerts..."
+    )
 
     alerts = get_active_alerts()
 
     if not alerts:
 
-        print("No active alerts.")
+        print(
+            "No active alerts."
+        )
+
         return
 
     for alert in alerts:
@@ -895,7 +1152,8 @@ async def check_price_alerts(app):
                 new_product_id,
                 new_game_name,
                 turkey_price,
-                original_price
+                original_price,
+                end_date
             ) = await asyncio.to_thread(
                 get_game_info,
                 url
@@ -966,10 +1224,13 @@ async def check_price_alerts(app):
 # حلقة التنبيهات
 # =========================================================
 
-async def alert_loop(app):
+async def alert_loop(
+    app
+):
 
-    # أول فحص بعد دقيقة
-    await asyncio.sleep(60)
+    await asyncio.sleep(
+        60
+    )
 
     while True:
 
@@ -986,12 +1247,13 @@ async def alert_loop(app):
                 repr(error)
             )
 
-        # فحص كل ساعة
-        await asyncio.sleep(3600)
+        await asyncio.sleep(
+            3600
+        )
 
 
 # =========================================================
-# /start
+# START
 # =========================================================
 
 async def start(
@@ -1007,7 +1269,7 @@ async def start(
 
 
 # =========================================================
-# /id
+# معرفة ID
 # =========================================================
 
 async def my_id(
@@ -1057,7 +1319,8 @@ async def handle_link(
             product_id,
             game_name,
             turkey_price,
-            original_price
+            original_price,
+            end_date
         ) = await asyncio.to_thread(
             get_game_info,
             text
@@ -1067,7 +1330,6 @@ async def handle_link(
             turkey_price
         )
 
-        # حفظ الرابط والسعر
         save_last_request(
             update.effective_user.id,
             product_id,
@@ -1088,7 +1350,7 @@ async def handle_link(
         )
 
         # =====================================================
-        # حساب نسبة الخصم
+        # نسبة الخصم
         # =====================================================
 
         discount_percent = None
@@ -1106,7 +1368,33 @@ async def handle_link(
             )
 
         # =====================================================
-        # رسالة اللعبة
+        # معلومات انتهاء التخفيض
+        # =====================================================
+
+        expiry_text = ""
+
+        if discount_percent is not None:
+
+            remaining_info = get_remaining_text(
+                end_date
+            )
+
+            if remaining_info:
+
+                (
+                    remaining_text,
+                    date_text,
+                    time_text
+                ) = remaining_info
+
+                expiry_text = (
+                    f"\n⏳ <b>ينتهي التخفيض:</b> "
+                    f"{date_text} الساعة {time_text}\n"
+                    f"📅 <b>{remaining_text}</b>\n"
+                )
+
+        # =====================================================
+        # الرسالة
         # =====================================================
 
         if discount_percent is not None:
@@ -1115,7 +1403,8 @@ async def handle_link(
                 f"🎮 <b>{game_name}</b>\n\n"
                 "🔥 <b>اللعبة عليها تخفيض!</b>\n\n"
                 f"📉 نسبة الخصم: "
-                f"<b>{discount_percent}%</b>\n\n"
+                f"<b>{discount_percent}%</b>\n"
+                f"{expiry_text}\n"
                 f"💰 سعر اللعبة: "
                 f"<b>{price_text}</b> 🇮🇶"
             )
@@ -1153,7 +1442,7 @@ async def handle_link(
 
 
 # =========================================================
-# التعامل مع الأزرار
+# الأزرار
 # =========================================================
 
 async def button_handler(
@@ -1334,10 +1623,6 @@ async def button_handler(
                 current_price
             ) = last_request
 
-        # =================================================
-        # اسم الزبون
-        # =================================================
-
         if user.username:
 
             customer_name = (
@@ -1353,10 +1638,6 @@ async def button_handler(
 
         customer_id = user.id
 
-        # =================================================
-        # السعر
-        # =================================================
-
         price_text = ""
 
         if current_price is not None:
@@ -1366,10 +1647,6 @@ async def button_handler(
                 f"<b>{format_store_price(current_price)}</b> 🇮🇶"
             )
 
-        # =================================================
-        # رسالة صاحب المتجر
-        # =================================================
-
         admin_message = (
             "🛒 <b>طلب جديد!</b>\n\n"
             f"🎮 اللعبة: <b>{game_name}</b>\n"
@@ -1377,10 +1654,6 @@ async def button_handler(
             f"🆔 ID: <code>{customer_id}</code>"
             f"{price_text}"
         )
-
-        # =================================================
-        # إرسال الإشعار لصاحب المتجر
-        # =================================================
 
         if ADMIN_CHAT_ID:
 
@@ -1404,10 +1677,6 @@ async def button_handler(
             print(
                 "ADMIN_CHAT_ID غير موجود"
             )
-
-        # =================================================
-        # رسالة للزبون
-        # =================================================
 
         customer_keyboard = InlineKeyboardMarkup([
             [
@@ -1438,7 +1707,7 @@ async def button_handler(
 
 
 # =========================================================
-# تشغيل النظام بعد بدء البوت
+# POST INIT
 # =========================================================
 
 async def post_init(
@@ -1475,7 +1744,6 @@ def main():
         .build()
     )
 
-    # /start
     application.add_handler(
         CommandHandler(
             "start",
@@ -1483,7 +1751,6 @@ def main():
         )
     )
 
-    # /id
     application.add_handler(
         CommandHandler(
             "id",
@@ -1491,14 +1758,12 @@ def main():
         )
     )
 
-    # الأزرار
     application.add_handler(
         CallbackQueryHandler(
             button_handler
         )
     )
 
-    # الرسائل والروابط
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
