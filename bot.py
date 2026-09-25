@@ -55,7 +55,7 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-# تخزين نتائج البحث التي تم التأكد أن لها سعر
+# كاش دائم داخل تشغيل البوت لنتائج البحث
 SEARCH_RESULT_CACHE = {}
 
 
@@ -676,6 +676,91 @@ def search_xbox_games(
 
 
 # =========================================================
+# حل نتيجة البحث بشكل موثوق
+# =========================================================
+
+def resolve_search_result(product_id, result_name=None):
+
+    product_id = str(product_id).upper()
+
+    # إذا البيانات موجودة بالكاش نستخدمها مباشرة
+    cached = SEARCH_RESULT_CACHE.get(product_id)
+
+    if cached:
+        return cached
+
+    # المحاولة الأولى: Product ID المباشر
+    try:
+
+        info = get_game_info_by_product_id(product_id)
+        SEARCH_RESULT_CACHE[product_id] = info
+        return info
+
+    except Exception as first_error:
+
+        print(
+            "DIRECT PRODUCT LOOKUP FAILED:",
+            product_id,
+            repr(first_error)
+        )
+
+    # بعض نتائج autosuggest تكون IDs لنسخة/إضافة
+    # بينما الاسم نفسه يحتوي على المنتج الأساسي.
+    # نعيد البحث بالاسم ونجرّب كل IDs الناتجة.
+    if result_name:
+
+        try:
+
+            alternatives = search_xbox_games(
+                result_name,
+                top=10
+            )
+
+            tried = set()
+
+            for alternative_id, alternative_name in alternatives:
+
+                alternative_id = alternative_id.upper()
+
+                if alternative_id in tried:
+                    continue
+
+                tried.add(alternative_id)
+
+                try:
+
+                    info = get_game_info_by_product_id(
+                        alternative_id
+                    )
+
+                    SEARCH_RESULT_CACHE[product_id] = info
+                    SEARCH_RESULT_CACHE[alternative_id] = info
+
+                    return info
+
+                except Exception as alternative_error:
+
+                    print(
+                        "ALTERNATIVE PRODUCT FAILED:",
+                        alternative_id,
+                        alternative_name,
+                        repr(alternative_error)
+                    )
+
+        except Exception as search_error:
+
+            print(
+                "ALTERNATIVE SEARCH FAILED:",
+                result_name,
+                repr(search_error)
+            )
+
+    raise Exception(
+        "ماكدرت أجيب سعر نتيجة البحث"
+    )
+
+
+# =========================================================
 # تنسيق السعر
 # =========================================================
 
@@ -1293,6 +1378,10 @@ async def handle_message(
 
     try:
 
+        # =================================================
+        # رابط Xbox
+        # =================================================
+
         if "xbox.com" in text.lower():
 
             (
@@ -1324,6 +1413,10 @@ async def handle_message(
 
             return
 
+        # =================================================
+        # اسم اللعبة
+        # =================================================
+
         results = await asyncio.to_thread(
             search_xbox_games,
             text,
@@ -1340,11 +1433,9 @@ async def handle_message(
 
             return
 
-        # نفحص كل نتيجة قبل عرضها.
-        # بعض نتائج Microsoft تكون Editions أو Add-ons
-        # وما يكون إلها سعر مباشر، لذلك ما نخليها تظهر
-        # كزر حتى ما يفشل المستخدم عند الضغط عليها.
-
+        # نفحص النتائج قبل عرضها، لكن نحتفظ باسم النتيجة.
+        # إذا كان Product ID المباشر غير قابل للتسعير،
+        # resolve_search_result يبحث عن النسخة القابلة للتسعير.
         valid_results = []
 
         for product_id, result_name in results:
@@ -1352,13 +1443,16 @@ async def handle_message(
             try:
 
                 info = await asyncio.to_thread(
-                    get_game_info_by_product_id,
-                    product_id
+                    resolve_search_result,
+                    product_id,
+                    result_name
                 )
 
-                SEARCH_RESULT_CACHE[
-                    product_id
-                ] = info
+                resolved_product_id = info[0]
+                resolved_name = info[1]
+
+                SEARCH_RESULT_CACHE[product_id] = info
+                SEARCH_RESULT_CACHE[resolved_product_id] = info
 
                 valid_results.append(
                     (
@@ -1379,36 +1473,49 @@ async def handle_message(
         if not valid_results:
 
             await processing.edit_text(
-                "❌ لكيت نتائج للعبة، "
-                "لكن Microsoft ما رجّع سعر متاح إلها حالياً.\n\n"
-                "جرب اسم اللعبة مرة ثانية "
-                "أو أرسل رابط Xbox Store."
+                "❌ لكيت نتائج للعبة، لكن ماكو سعر متاح "
+                "إلها حالياً.\n\n"
+                "جرب اسم اللعبة مرة ثانية أو أرسل رابط Xbox Store."
             )
 
             return
+
+        # =================================================
+        # نتيجة واحدة
+        # =================================================
 
         if len(valid_results) == 1:
 
             product_id, result_name = valid_results[0]
 
+            info = SEARCH_RESULT_CACHE.get(
+                product_id
+            )
+
+            if not info:
+
+                info = await asyncio.to_thread(
+                    resolve_search_result,
+                    product_id,
+                    result_name
+                )
+
             (
-                product_id,
+                resolved_product_id,
                 game_name,
                 turkey_price,
                 original_price,
                 end_date
-            ) = SEARCH_RESULT_CACHE[
-                product_id
-            ]
+            ) = info
 
             message, keyboard = create_game_result(
                 update,
-                product_id,
+                resolved_product_id,
                 game_name,
                 turkey_price,
                 original_price,
                 end_date,
-                f"xboxid:{product_id}"
+                f"xboxid:{resolved_product_id}"
             )
 
             await processing.edit_text(
@@ -1418,6 +1525,10 @@ async def handle_message(
             )
 
             return
+
+        # =================================================
+        # أكثر من نتيجة
+        # =================================================
 
         buttons = []
 
@@ -1452,8 +1563,7 @@ async def handle_message(
 
         await processing.edit_text(
             "❌ صار خطأ أثناء جلب معلومات اللعبة.\n\n"
-            "تأكد من الاسم أو الرابط "
-            "وجرب مرة ثانية."
+            "تأكد من الاسم أو الرابط وجرب مرة ثانية."
         )
 
 
@@ -1622,8 +1732,8 @@ async def button_handler(
 
         try:
 
-            # البيانات تم فحصها مسبقاً أثناء البحث،
-            # لذلك نستخدمها مباشرة عند الضغط.
+            # نستخدم الكاش أولاً، وإذا البوت أعاد التشغيل
+            # نستخدم Product ID مباشرة.
             info = SEARCH_RESULT_CACHE.get(
                 product_id
             )
@@ -1635,12 +1745,10 @@ async def button_handler(
                     product_id
                 )
 
-                SEARCH_RESULT_CACHE[
-                    product_id
-                ] = info
+                SEARCH_RESULT_CACHE[product_id] = info
 
             (
-                product_id,
+                resolved_product_id,
                 game_name,
                 turkey_price,
                 original_price,
@@ -1649,12 +1757,12 @@ async def button_handler(
 
             message, keyboard = create_game_result(
                 query,
-                product_id,
+                resolved_product_id,
                 game_name,
                 turkey_price,
                 original_price,
                 end_date,
-                f"xboxid:{product_id}"
+                f"xboxid:{resolved_product_id}"
             )
 
             await query.edit_message_text(
