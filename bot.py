@@ -97,8 +97,96 @@ def init_database():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS favorites (
+            user_id INTEGER NOT NULL,
+            product_id TEXT NOT NULL,
+            game_name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            current_price INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, product_id)
+        )
+    """)
+
     connection.commit()
     connection.close()
+
+
+# =========================================================
+# المفضلة
+# =========================================================
+
+def favorite_exists(user_id, product_id):
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        "SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ? LIMIT 1",
+        (user_id, product_id)
+    )
+
+    exists = cursor.fetchone() is not None
+    connection.close()
+
+    return exists
+
+
+def add_favorite(user_id, product_id, game_name, url, current_price):
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO favorites
+        (user_id, product_id, game_name, url, current_price)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (user_id, product_id, game_name, url, current_price)
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def remove_favorite(user_id, product_id):
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        "DELETE FROM favorites WHERE user_id = ? AND product_id = ?",
+        (user_id, product_id)
+    )
+
+    changed = cursor.rowcount
+    connection.commit()
+    connection.close()
+
+    return changed > 0
+
+
+def get_favorites(user_id):
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT product_id, game_name, url, current_price
+        FROM favorites
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        """,
+        (user_id,)
+    )
+
+    rows = cursor.fetchall()
+    connection.close()
+
+    return rows
 
 
 # =========================================================
@@ -1187,7 +1275,8 @@ def get_game_keyboard(
     product_id,
     active,
     show_back=False,
-    has_discount=False
+    has_discount=False,
+    is_favorite=False
 ):
 
     buttons = [
@@ -1196,11 +1285,26 @@ def get_game_keyboard(
                 "🛒 اطلب الآن",
                 callback_data=f"order:{product_id}"
             )
+        ],
+        [
+            InlineKeyboardButton(
+                "📋 نسخ السعر",
+                callback_data=f"copy:{product_id}"
+            ),
+            InlineKeyboardButton(
+                "💛 إزالة من المفضلة" if is_favorite else "⭐ أضف للمفضلة",
+                callback_data=f"favremove:{product_id}" if is_favorite else f"favadd:{product_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⭐ ألعابي المفضلة",
+                callback_data="favlist"
+            )
         ]
     ]
 
     # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة.
-    # إذا اللعبة عليها تخفيض، لا نعرض لا "نبهني" ولا زر التنبيه.
     if not has_discount:
 
         if active:
@@ -1236,9 +1340,7 @@ def get_game_keyboard(
             ]
         )
 
-    return InlineKeyboardMarkup(
-        buttons
-    )
+    return InlineKeyboardMarkup(buttons)
 
 
 # =========================================================
@@ -1349,7 +1451,11 @@ def create_game_result(
             product_id
         ),
         show_back,
-        discount_percent is not None
+        discount_percent is not None,
+        favorite_exists(
+            user.id,
+            product_id
+        )
     )
 
     return message, keyboard
@@ -1877,6 +1983,225 @@ async def button_handler(
         return
 
     # =====================================================
+    # نسخ السعر / معلومات اللعبة
+    # =====================================================
+
+    if data.startswith("copy:"):
+
+        product_id = data.split(":", 1)[1]
+        last_request = get_last_request(user_id, product_id)
+
+        if not last_request:
+            await query.answer(
+                "❌ معلومات اللعبة غير متوفرة، ابحث عنها مرة ثانية.",
+                show_alert=True
+            )
+            return
+
+        game_name, url, current_price = last_request
+
+        copy_text = (
+            f"🎮 {game_name}\n"
+            f"💰 السعر: {format_store_price(current_price)} 🇮🇶"
+        )
+
+        try:
+            info = await asyncio.to_thread(
+                get_game_info_by_product_id,
+                product_id
+            )
+
+            _, _, turkey_price, original_price, _ = info
+
+            if (
+                original_price is not None
+                and original_price > turkey_price
+            ):
+                discount_percent = round(
+                    ((original_price - turkey_price) / original_price) * 100
+                )
+                copy_text += f"\n📉 الخصم: {discount_percent}%"
+        except Exception:
+            pass
+
+        await query.answer("📋 تم تجهيز معلومات اللعبة")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=copy_text
+        )
+        return
+
+    # =====================================================
+    # إضافة للمفضلة
+    # =====================================================
+
+    if data.startswith("favadd:"):
+
+        product_id = data.split(":", 1)[1]
+        last_request = get_last_request(user_id, product_id)
+
+        if not last_request:
+            await query.answer(
+                "❌ ابحث عن اللعبة مرة ثانية.",
+                show_alert=True
+            )
+            return
+
+        game_name, url, current_price = last_request
+        add_favorite(user_id, product_id, game_name, url, current_price)
+
+        has_discount = False
+
+        try:
+            info = await asyncio.to_thread(
+                get_game_info_by_product_id,
+                product_id
+            )
+            _, _, turkey_price, original_price, _ = info
+            has_discount = (
+                original_price is not None
+                and original_price > turkey_price
+            )
+        except Exception:
+            pass
+
+        await query.answer("⭐ تمت إضافة اللعبة للمفضلة")
+
+        await query.edit_message_reply_markup(
+            reply_markup=get_game_keyboard(
+                product_id,
+                alert_exists(user_id, product_id),
+                show_back=user_id in SEARCH_SELECTIONS,
+                has_discount=has_discount,
+                is_favorite=True
+            )
+        )
+        return
+
+    # =====================================================
+    # إزالة من المفضلة
+    # =====================================================
+
+    if data.startswith("favremove:"):
+
+        product_id = data.split(":", 1)[1]
+        remove_favorite(user_id, product_id)
+
+        await query.answer("💔 تمت إزالة اللعبة من المفضلة")
+
+        # نعيد جلب معلومات آخر طلب حتى نعرف هل عليها تخفيض أم لا.
+        last_request = get_last_request(user_id, product_id)
+        has_discount = False
+
+        if last_request:
+            try:
+                info = await asyncio.to_thread(
+                    get_game_info_by_product_id,
+                    product_id
+                )
+                _, _, turkey_price, original_price, _ = info
+                has_discount = (
+                    original_price is not None
+                    and original_price > turkey_price
+                )
+            except Exception:
+                pass
+
+        await query.edit_message_reply_markup(
+            reply_markup=get_game_keyboard(
+                product_id,
+                alert_exists(user_id, product_id),
+                show_back=user_id in SEARCH_SELECTIONS,
+                has_discount=has_discount,
+                is_favorite=False
+            )
+        )
+        return
+
+    # =====================================================
+    # قائمة المفضلة
+    # =====================================================
+
+    if data == "favlist":
+
+        favorites = get_favorites(user_id)
+
+        if not favorites:
+            await query.answer(
+                "⭐ ما عندك ألعاب بالمفضلة حالياً.",
+                show_alert=True
+            )
+            return
+
+        buttons = []
+
+        for product_id, game_name, url, current_price in favorites:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"⭐ {game_name[:50]}",
+                    callback_data=f"favopen:{product_id}"
+                )
+            ])
+
+        await query.answer()
+        await query.edit_message_text(
+            "⭐ <b>ألعابك المفضلة:</b>\n\n"
+            "اختار لعبة حتى تشوف سعرها الحالي 👇",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    # =====================================================
+    # فتح لعبة من المفضلة
+    # =====================================================
+
+    if data.startswith("favopen:"):
+
+        product_id = data.split(":", 1)[1]
+
+        await query.answer("⏳ جاري تحديث السعر...")
+
+        try:
+            info = await asyncio.to_thread(
+                get_game_info_by_product_id,
+                product_id
+            )
+
+            (
+                resolved_product_id,
+                game_name,
+                turkey_price,
+                original_price,
+                end_date
+            ) = info
+
+            message, keyboard = create_game_result(
+                query,
+                resolved_product_id,
+                game_name,
+                turkey_price,
+                original_price,
+                end_date,
+                f"xboxid:{resolved_product_id}",
+                show_back=False
+            )
+
+            await query.edit_message_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+        except Exception as error:
+            print("FAVORITE OPEN ERROR:", product_id, repr(error))
+            await query.edit_message_text(
+                "❌ ماكدرت أحدث سعر اللعبة، حاول مرة ثانية."
+            )
+
+        return
+
+    # =====================================================
     # تفعيل التنبيه
     # =====================================================
 
@@ -1935,7 +2260,10 @@ async def button_handler(
         await query.edit_message_reply_markup(
             reply_markup=get_game_keyboard(
                 product_id,
-                True
+                True,
+                show_back=user_id in SEARCH_SELECTIONS,
+                has_discount=False,
+                is_favorite=favorite_exists(user_id, product_id)
             )
         )
 
@@ -1981,7 +2309,10 @@ async def button_handler(
             await query.edit_message_reply_markup(
                 reply_markup=get_game_keyboard(
                     product_id,
-                    False
+                    False,
+                    show_back=True,
+                    has_discount=False,
+                    is_favorite=favorite_exists(user_id, product_id)
                 )
             )
 
