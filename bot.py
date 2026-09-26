@@ -1186,7 +1186,8 @@ def get_remaining_text(end_date):
 def get_game_keyboard(
     product_id,
     active,
-    show_back=False
+    show_back=False,
+    has_discount=False
 ):
 
     buttons = [
@@ -1198,27 +1199,31 @@ def get_game_keyboard(
         ]
     ]
 
-    if active:
+    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة.
+    # إذا اللعبة عليها تخفيض، لا نعرض لا "نبهني" ولا زر التنبيه.
+    if not has_discount:
 
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    "🔕 إلغاء التنبيه",
-                    callback_data=f"cancel:{product_id}"
-                )
-            ]
-        )
+        if active:
 
-    else:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "🔕 إلغاء التنبيه",
+                        callback_data=f"cancel:{product_id}"
+                    )
+                ]
+            )
 
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    "🔔 نبهني إذا نزل السعر",
-                    callback_data=f"alert:{product_id}"
-                )
-            ]
-        )
+        else:
+
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "🔔 نبهني إذا نزل السعر",
+                        callback_data=f"alert:{product_id}"
+                    )
+                ]
+            )
 
     if show_back:
 
@@ -1343,7 +1348,8 @@ def create_game_result(
             user.id,
             product_id
         ),
-        show_back
+        show_back,
+        discount_percent is not None
     )
 
     return message, keyboard
