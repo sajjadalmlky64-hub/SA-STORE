@@ -2,6 +2,7 @@ import os
 import re
 import math
 import asyncio
+import time
 import sqlite3
 import requests
 
@@ -589,32 +590,103 @@ def best_price(items):
 # 💰 ألعاب حسب الميزانية
 # =========================================================
 
-BUDGET_CACHE = {}
+# كاش مؤقت حتى لا نعيد جلب آلاف الألعاب مع كل ضغطة.
+BUDGET_CACHE = {
+    "updated_at": 0,
+    "games": []
+}
+BUDGET_CACHE_TTL = 30 * 60
 
 
-def get_budget_product_ids(limit_per_list=60):
+BUDGET_LISTS = [
+    "Computed/TopPaid",
+    "Computed/Deal",
+    "Computed/New",
+    "Computed/BestRated",
+]
 
-    lists = [
-        "Computed/TopPaid",
-        "Computed/Deal",
-        "Computed/New",
-    ]
+
+def extract_reco_product_ids(data):
+    """استخراج Product IDs من استجابة Microsoft Recommendations."""
+
+    ids = []
+
+    # الشكل الموثق: {"Items": [{"Id": "XXXXXXXXXXXX"}, ...]}
+    if isinstance(data, dict):
+
+        items = data.get("Items")
+
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+
+                product_id = item.get("Id")
+
+                if product_id:
+                    product_id = str(product_id).strip().upper()
+
+                    # Xbox Store Product IDs عادة 12 محرفاً.
+                    if re.fullmatch(r"[A-Z0-9]{12}", product_id):
+                        ids.append(product_id)
+
+    # احتياط إذا تغير شكل الاستجابة.
+    if not ids:
+
+        def walk(value):
+            found = []
+
+            if isinstance(value, dict):
+                for key in ("ProductId", "ProductID", "BigId", "bigId"):
+                    candidate = value.get(key)
+                    if candidate:
+                        candidate = str(candidate).strip().upper()
+                        if re.fullmatch(r"[A-Z0-9]{12}", candidate):
+                            found.append(candidate)
+
+                for child in value.values():
+                    found.extend(walk(child))
+
+            elif isinstance(value, list):
+                for child in value:
+                    found.extend(walk(child))
+
+            return found
+
+        ids = walk(data)
+
+    # إزالة التكرار مع الحفاظ على الترتيب.
+    unique = []
+    seen = set()
+
+    for product_id in ids:
+        if product_id in seen:
+            continue
+        seen.add(product_id)
+        unique.append(product_id)
+
+    return unique
+
+
+def get_budget_product_ids(limit_per_list=1000):
+    """يجلب آلاف Product IDs من قوائم Xbox العامة."""
 
     ids = []
     seen = set()
 
-    for list_name in lists:
+    for list_name in BUDGET_LISTS:
 
         url = (
             "https://reco-public.rec.mp.microsoft.com/"
-            "channels/Reco/V8.0/Lists/api/list/"
+            "channels/Reco/V8.0/Lists/"
             + list_name
         )
 
+        # مهم: Microsoft يستخدم itemTypes وليس itemType.
         params = {
             "market": "TR",
             "language": "tr-TR",
-            "itemType": "Game",
+            "itemTypes": "Game",
             "deviceFamily": "Windows.Xbox",
             "count": str(limit_per_list),
             "skipItems": "0"
@@ -623,46 +695,21 @@ def get_budget_product_ids(limit_per_list=60):
         response = SESSION.get(
             url,
             params=params,
-            timeout=30
+            timeout=45
         )
         response.raise_for_status()
+
         data = response.json()
+        list_ids = extract_reco_product_ids(data)
 
-        def walk(value):
+        print(
+            "BUDGET LIST:",
+            list_name,
+            "IDS:",
+            len(list_ids)
+        )
 
-            found = []
-
-            if isinstance(value, dict):
-
-                for key in (
-                    "ProductId",
-                    "ProductID",
-                    "productId",
-                    "productID",
-                    "BigId",
-                    "bigId",
-                    "Id",
-                    "id"
-                ):
-                    candidate = value.get(key)
-                    if candidate:
-                        text = str(candidate).strip().upper()
-                        if 8 <= len(text) <= 20 and text.isalnum():
-                            found.append(text)
-                            break
-
-                for child in value.values():
-                    found.extend(walk(child))
-
-            elif isinstance(value, list):
-
-                for child in value:
-                    found.extend(walk(child))
-
-            return found
-
-        for product_id in walk(data):
-
+        for product_id in list_ids:
             if product_id in seen:
                 continue
 
@@ -706,25 +753,30 @@ def get_products_batch(product_ids):
     return []
 
 
-def get_budget_games(budget_iqd, limit=8):
+def build_budget_catalog():
+    """يبني كتالوج أسعار محلي من Product IDs ثم يحفظه بالكاش."""
 
-    # نجرب قائمة محفوظة خلال نفس تشغيل البوت أولاً.
-    ids = get_budget_product_ids(60)
+    product_ids = get_budget_product_ids(1000)
 
-    if not ids:
-        return []
+    if not product_ids:
+        raise Exception("Microsoft لم يرجع أي Product IDs")
 
-    results = []
+    catalog = []
 
-    # Microsoft يقبل أكثر من Product ID في طلب واحد، فنقسمها دفعات.
-    for start in range(0, len(ids), 20):
+    # Display Catalog يسمح بجلب عدة Big IDs في الطلب الواحد.
+    # 50 مناسب لتقليل عدد الطلبات بدون جعل الرابط ضخماً جداً.
+    for start in range(0, len(product_ids), 50):
 
-        batch_ids = ids[start:start + 20]
+        batch_ids = product_ids[start:start + 50]
 
         try:
             products = get_products_batch(batch_ids)
         except Exception as error:
-            print("BUDGET BATCH ERROR:", repr(error))
+            print(
+                "BUDGET BATCH ERROR:",
+                start,
+                repr(error)
+            )
             continue
 
         for product in products:
@@ -736,11 +788,12 @@ def get_budget_games(budget_iqd, limit=8):
                     or ""
                 ).upper()
 
-                if not product_id:
+                if not re.fullmatch(r"[A-Z0-9]{12}", product_id):
                     continue
 
                 game_name = get_game_name(product)
                 prices = get_prices(product)
+
                 turkey_price, original_price, end_date = best_price(prices)
 
                 if turkey_price is None:
@@ -748,33 +801,81 @@ def get_budget_games(budget_iqd, limit=8):
 
                 store_price = calculate_price(turkey_price)
 
-                if store_price <= budget_iqd:
-                    results.append((
-                        store_price,
-                        game_name,
-                        product_id,
-                        original_price,
-                        turkey_price,
-                        end_date
-                    ))
+                catalog.append({
+                    "store_price": store_price,
+                    "game_name": game_name,
+                    "product_id": product_id,
+                    "original_price": original_price,
+                    "turkey_price": turkey_price,
+                    "end_date": end_date,
+                })
 
             except Exception as error:
-                print("BUDGET PRODUCT ERROR:", repr(error))
+                print(
+                    "BUDGET PRODUCT ERROR:",
+                    repr(error)
+                )
 
-    # إزالة التكرار وترتيب الأرخص أولاً.
+    # إزالة التكرار واختيار أرخص سعر للـ Product ID.
     unique = {}
 
-    for item in results:
-        product_id = item[2]
-        if product_id not in unique or item[0] < unique[product_id][0]:
+    for item in catalog:
+        product_id = item["product_id"]
+
+        if (
+            product_id not in unique
+            or item["store_price"] < unique[product_id]["store_price"]
+        ):
             unique[product_id] = item
 
-    results = sorted(
-        unique.values(),
-        key=lambda item: (item[0], item[1].lower())
+    games = list(unique.values())
+
+    games.sort(
+        key=lambda item: (
+            item["store_price"],
+            item["game_name"].lower()
+        )
     )
 
-    return results[:limit]
+    BUDGET_CACHE["updated_at"] = time.monotonic()
+    BUDGET_CACHE["games"] = games
+
+    print(
+        "BUDGET CATALOG READY:",
+        len(games),
+        "games"
+    )
+
+    return games
+
+
+def get_budget_games(budget_iqd, limit=8):
+
+    now = time.monotonic()
+
+    if (
+        not BUDGET_CACHE["games"]
+        or now - BUDGET_CACHE["updated_at"] > BUDGET_CACHE_TTL
+    ):
+        games = build_budget_catalog()
+    else:
+        games = BUDGET_CACHE["games"]
+
+    matches = [
+        (
+            item["store_price"],
+            item["game_name"],
+            item["product_id"],
+            item["original_price"],
+            item["turkey_price"],
+            item["end_date"]
+        )
+        for item in games
+        if item["store_price"] <= budget_iqd
+    ]
+
+    # نختار أسعار متنوعة حتى لا تكون القائمة كلها بنفس السعر.
+    return matches[:limit]
 
 
 # =========================================================
@@ -2216,7 +2317,7 @@ async def button_handler(
                 InlineKeyboardButton("💵 50 ألف", callback_data="budget:50000")
             ],
             [
-                InlineKeyboardButton("🏠 الرئيسية", callback_data="adminhome")
+                InlineKeyboardButton("🏠 الرئيسية", callback_data="home")
             ]
         ])
 
@@ -2254,7 +2355,7 @@ async def button_handler(
                 "جرب ميزانية أعلى.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("💰 تغيير الميزانية", callback_data="budgetmenu")],
-                    [InlineKeyboardButton("🏠 الرئيسية", callback_data="adminhome")]
+                    [InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]
                 ])
             )
             return
@@ -2282,7 +2383,7 @@ async def button_handler(
             InlineKeyboardButton("💰 تغيير الميزانية", callback_data="budgetmenu")
         ])
         buttons.append([
-            InlineKeyboardButton("🏠 الرئيسية", callback_data="adminhome")
+            InlineKeyboardButton("🏠 الرئيسية", callback_data="home")
         ])
 
         await query.edit_message_text(
@@ -2333,7 +2434,7 @@ async def button_handler(
                 "جرب لعبة ثانية.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("💰 رجوع للميزانية", callback_data="budgetmenu")],
-                    [InlineKeyboardButton("🏠 الرئيسية", callback_data="adminhome")]
+                    [InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]
                 ])
             )
 
@@ -2395,10 +2496,44 @@ async def button_handler(
                 [
                     InlineKeyboardButton(
                         "🏠 الرئيسية",
-                        callback_data="adminhome"
+                        callback_data="home"
                     )
                 ]
             ])
+        )
+        return
+
+    # =====================================================
+    # الرئيسية - للمستخدمين
+    # =====================================================
+
+    if data == "home":
+
+        await query.answer()
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "💰 شكد أگدر أشتري؟",
+                    callback_data="budgetmenu"
+                )
+            ]
+        ]
+
+        if ADMIN_CHAT_ID and str(user_id) == str(ADMIN_CHAT_ID):
+            buttons.append([
+                InlineKeyboardButton(
+                    "🧾 سجل الطلبات",
+                    callback_data="adminorders"
+                )
+            ])
+
+        await query.edit_message_text(
+            "🎮 <b>SA STORE</b>\n\n"
+            "أرسل رابط لعبة من Xbox Store\n"
+            "أو اكتب اسم اللعبة 🔍",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
         return
 
