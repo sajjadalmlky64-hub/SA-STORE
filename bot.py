@@ -109,6 +109,18 @@ def init_database():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            customer_name TEXT NOT NULL,
+            game_name TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            price INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     connection.commit()
     connection.close()
 
@@ -1472,9 +1484,22 @@ async def start(
 
     if update.message:
 
+        keyboard = None
+
+        if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🧾 سجل الطلبات",
+                        callback_data="adminorders"
+                    )
+                ]
+            ])
+
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
-            "أو اكتب اسم اللعبة 🔍"
+            "أو اكتب اسم اللعبة 🔍",
+            reply_markup=keyboard
         )
 
 
@@ -1493,6 +1518,64 @@ async def my_id(
             f"🆔 Telegram ID مالك:\n\n"
             f"{update.effective_user.id}"
         )
+
+
+# =========================================================
+# سجل الطلبات - أمر الأدمن
+# =========================================================
+
+async def admin_orders_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
+        return
+
+    if not ADMIN_CHAT_ID or str(update.effective_user.id) != str(ADMIN_CHAT_ID):
+        await update.message.reply_text(
+            "❌ هذا الأمر للأدمن فقط."
+        )
+        return
+
+    orders = get_orders(50)
+
+    if not orders:
+        await update.message.reply_text(
+            "🧾 سجل الطلبات\n\nماكو طلبات مسجلة حالياً."
+        )
+        return
+
+    lines = ["🧾 <b>سجل الطلبات</b>", ""]
+
+    for order_id, customer_name, game_name, price, created_at in orders:
+        price_text = (
+            format_store_price(price)
+            if price is not None
+            else "غير معروف"
+        )
+        lines.append(
+            f"<b>#{order_id}</b> 🎮 {game_name[:45]}\n"
+            f"👤 {customer_name}\n"
+            f"💰 {price_text} 🇮🇶\n"
+            f"🕐 {created_at}"
+        )
+        lines.append("────────────")
+
+    lines.append("\n📌 آخر 50 طلب فقط")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔄 تحديث",
+                    callback_data="adminorders"
+                )
+            ]
+        ])
+    )
 
 
 # =========================================================
@@ -1809,6 +1892,60 @@ async def check_price_alerts(
 
 
 # =========================================================
+# سجل الطلبات
+# =========================================================
+
+def save_order(
+    user_id,
+    customer_name,
+    game_name,
+    product_id,
+    price
+):
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO orders
+        (user_id, customer_name, game_name, product_id, price)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            customer_name,
+            game_name,
+            product_id,
+            price
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def get_orders(limit=50):
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, customer_name, game_name, price, created_at
+        FROM orders
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,)
+    )
+
+    rows = cursor.fetchall()
+    connection.close()
+    return rows
+
+
+# =========================================================
 # حلقة التنبيهات
 # =========================================================
 
@@ -1858,6 +1995,99 @@ async def button_handler(
 
     user = query.from_user
     user_id = user.id
+
+    # =====================================================
+    # سجل الطلبات - للأدمن فقط
+    # =====================================================
+
+    if data == "adminorders":
+
+        if not ADMIN_CHAT_ID or str(user_id) != str(ADMIN_CHAT_ID):
+            await query.answer(
+                "❌ هذا القسم للأدمن فقط",
+                show_alert=True
+            )
+            return
+
+        orders = get_orders(50)
+
+        if not orders:
+            await query.answer()
+            await query.edit_message_text(
+                "🧾 <b>سجل الطلبات</b>\n\n"
+                "ماكو طلبات مسجلة حالياً.",
+                parse_mode="HTML"
+            )
+            return
+
+        lines = ["🧾 <b>سجل الطلبات</b>", ""]
+
+        for order_id, customer_name, game_name, price, created_at in orders:
+            price_text = (
+                format_store_price(price)
+                if price is not None
+                else "غير معروف"
+            )
+            lines.append(
+                f"<b>#{order_id}</b> 🎮 {game_name[:45]}\n"
+                f"👤 {customer_name}\n"
+                f"💰 {price_text} 🇮🇶\n"
+                f"🕐 {created_at}"
+            )
+            lines.append("────────────")
+
+        lines.append("\n📌 آخر 50 طلب فقط")
+
+        await query.answer()
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔄 تحديث",
+                        callback_data="adminorders"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 الرئيسية",
+                        callback_data="adminhome"
+                    )
+                ]
+            ])
+        )
+        return
+
+    # =====================================================
+    # الرئيسية - للأدمن
+    # =====================================================
+
+    if data == "adminhome":
+
+        if not ADMIN_CHAT_ID or str(user_id) != str(ADMIN_CHAT_ID):
+            await query.answer(
+                "❌ هذا القسم للأدمن فقط",
+                show_alert=True
+            )
+            return
+
+        await query.answer()
+        await query.edit_message_text(
+            "🎮 <b>SA STORE</b>\n\n"
+            "أرسل رابط لعبة من Xbox Store\n"
+            "أو اكتب اسم اللعبة 🔍",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🧾 سجل الطلبات",
+                        callback_data="adminorders"
+                    )
+                ]
+            ])
+        )
+        return
 
     # =====================================================
     # اختيار نتيجة البحث
@@ -2367,6 +2597,14 @@ async def button_handler(
                 or "بدون اسم"
             )
 
+        save_order(
+            user_id,
+            customer_name,
+            game_name,
+            product_id,
+            current_price
+        )
+
         price_text = ""
 
         if current_price is not None:
@@ -2479,6 +2717,13 @@ def main():
         CommandHandler(
             "id",
             my_id
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "orders",
+            admin_orders_command
         )
     )
 
