@@ -2,7 +2,6 @@ import os
 import re
 import math
 import asyncio
-import time
 import sqlite3
 import requests
 
@@ -56,12 +55,6 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-# كاش دائم داخل تشغيل البوت لنتائج البحث
-SEARCH_RESULT_CACHE = {}
-
-# آخر قائمة نتائج بحث لكل مستخدم، حتى نقدر نرجع لها بعد اختيار إصدار.
-SEARCH_SELECTIONS = {}
-
 
 # =========================================================
 # قاعدة البيانات
@@ -98,108 +91,8 @@ def init_database():
         )
     """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS favorites (
-            user_id INTEGER NOT NULL,
-            product_id TEXT NOT NULL,
-            game_name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            current_price INTEGER NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (user_id, product_id)
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            customer_name TEXT NOT NULL,
-            game_name TEXT NOT NULL,
-            product_id TEXT NOT NULL,
-            price INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
     connection.commit()
     connection.close()
-
-
-# =========================================================
-# المفضلة
-# =========================================================
-
-def favorite_exists(user_id, product_id):
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        "SELECT 1 FROM favorites WHERE user_id = ? AND product_id = ? LIMIT 1",
-        (user_id, product_id)
-    )
-
-    exists = cursor.fetchone() is not None
-    connection.close()
-
-    return exists
-
-
-def add_favorite(user_id, product_id, game_name, url, current_price):
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        INSERT OR REPLACE INTO favorites
-        (user_id, product_id, game_name, url, current_price)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (user_id, product_id, game_name, url, current_price)
-    )
-
-    connection.commit()
-    connection.close()
-
-
-def remove_favorite(user_id, product_id):
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        "DELETE FROM favorites WHERE user_id = ? AND product_id = ?",
-        (user_id, product_id)
-    )
-
-    changed = cursor.rowcount
-    connection.commit()
-    connection.close()
-
-    return changed > 0
-
-
-def get_favorites(user_id):
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        SELECT product_id, game_name, url, current_price
-        FROM favorites
-        WHERE user_id = ?
-        ORDER BY created_at DESC
-        """,
-        (user_id,)
-    )
-
-    rows = cursor.fetchall()
-    connection.close()
-
-    return rows
 
 
 # =========================================================
@@ -585,299 +478,6 @@ def best_price(items):
     return price, None, None
 
 
-
-# =========================================================
-# 💰 ألعاب حسب الميزانية
-# =========================================================
-
-# كاش مؤقت حتى لا نعيد جلب آلاف الألعاب مع كل ضغطة.
-BUDGET_CACHE = {
-    "updated_at": 0,
-    "games": []
-}
-BUDGET_CACHE_TTL = 30 * 60
-
-
-BUDGET_LISTS = [
-    "Computed/TopPaid",
-    "Computed/Deal",
-    "Computed/New",
-    "Computed/BestRated",
-]
-
-
-def extract_reco_product_ids(data):
-    """استخراج Product IDs من استجابة Microsoft Recommendations."""
-
-    ids = []
-
-    # الشكل الموثق: {"Items": [{"Id": "XXXXXXXXXXXX"}, ...]}
-    if isinstance(data, dict):
-
-        items = data.get("Items")
-
-        if isinstance(items, list):
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-
-                product_id = item.get("Id")
-
-                if product_id:
-                    product_id = str(product_id).strip().upper()
-
-                    # Xbox Store Product IDs عادة 12 محرفاً.
-                    if re.fullmatch(r"[A-Z0-9]{12}", product_id):
-                        ids.append(product_id)
-
-    # احتياط إذا تغير شكل الاستجابة.
-    if not ids:
-
-        def walk(value):
-            found = []
-
-            if isinstance(value, dict):
-                for key in ("ProductId", "ProductID", "BigId", "bigId"):
-                    candidate = value.get(key)
-                    if candidate:
-                        candidate = str(candidate).strip().upper()
-                        if re.fullmatch(r"[A-Z0-9]{12}", candidate):
-                            found.append(candidate)
-
-                for child in value.values():
-                    found.extend(walk(child))
-
-            elif isinstance(value, list):
-                for child in value:
-                    found.extend(walk(child))
-
-            return found
-
-        ids = walk(data)
-
-    # إزالة التكرار مع الحفاظ على الترتيب.
-    unique = []
-    seen = set()
-
-    for product_id in ids:
-        if product_id in seen:
-            continue
-        seen.add(product_id)
-        unique.append(product_id)
-
-    return unique
-
-
-def get_budget_product_ids(limit_per_list=1000):
-    """يجلب آلاف Product IDs من قوائم Xbox العامة."""
-
-    ids = []
-    seen = set()
-
-    for list_name in BUDGET_LISTS:
-
-        url = (
-            "https://reco-public.rec.mp.microsoft.com/"
-            "channels/Reco/V8.0/Lists/"
-            + list_name
-        )
-
-        # مهم: Microsoft يستخدم itemTypes وليس itemType.
-        params = {
-            "market": "TR",
-            "language": "tr-TR",
-            "itemTypes": "Game",
-            "deviceFamily": "Windows.Xbox",
-            "count": str(limit_per_list),
-            "skipItems": "0"
-        }
-
-        response = SESSION.get(
-            url,
-            params=params,
-            timeout=45
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        list_ids = extract_reco_product_ids(data)
-
-        print(
-            "BUDGET LIST:",
-            list_name,
-            "IDS:",
-            len(list_ids)
-        )
-
-        for product_id in list_ids:
-            if product_id in seen:
-                continue
-
-            seen.add(product_id)
-            ids.append(product_id)
-
-    return ids
-
-
-def get_products_batch(product_ids):
-
-    if not product_ids:
-        return []
-
-    url = (
-        "https://displaycatalog.mp.microsoft.com/"
-        "v7.0/products"
-    )
-
-    params = {
-        "bigIds": ",".join(product_ids),
-        "market": "TR",
-        "languages": "tr-TR,en-US",
-        "fieldsTemplate": "Details",
-        "actionFilter": "Browse"
-    }
-
-    response = SESSION.get(
-        url,
-        params=params,
-        timeout=45
-    )
-    response.raise_for_status()
-
-    data = response.json()
-    products = data.get("Products", [])
-
-    if isinstance(products, list):
-        return products
-
-    return []
-
-
-def build_budget_catalog():
-    """يبني كتالوج أسعار محلي من Product IDs ثم يحفظه بالكاش."""
-
-    product_ids = get_budget_product_ids(1000)
-
-    if not product_ids:
-        raise Exception("Microsoft لم يرجع أي Product IDs")
-
-    catalog = []
-
-    # Display Catalog يسمح بجلب عدة Big IDs في الطلب الواحد.
-    # 50 مناسب لتقليل عدد الطلبات بدون جعل الرابط ضخماً جداً.
-    for start in range(0, len(product_ids), 50):
-
-        batch_ids = product_ids[start:start + 50]
-
-        try:
-            products = get_products_batch(batch_ids)
-        except Exception as error:
-            print(
-                "BUDGET BATCH ERROR:",
-                start,
-                repr(error)
-            )
-            continue
-
-        for product in products:
-
-            try:
-                product_id = str(
-                    product.get("ProductId")
-                    or product.get("ProductID")
-                    or ""
-                ).upper()
-
-                if not re.fullmatch(r"[A-Z0-9]{12}", product_id):
-                    continue
-
-                game_name = get_game_name(product)
-                prices = get_prices(product)
-
-                turkey_price, original_price, end_date = best_price(prices)
-
-                if turkey_price is None:
-                    continue
-
-                store_price = calculate_price(turkey_price)
-
-                catalog.append({
-                    "store_price": store_price,
-                    "game_name": game_name,
-                    "product_id": product_id,
-                    "original_price": original_price,
-                    "turkey_price": turkey_price,
-                    "end_date": end_date,
-                })
-
-            except Exception as error:
-                print(
-                    "BUDGET PRODUCT ERROR:",
-                    repr(error)
-                )
-
-    # إزالة التكرار واختيار أرخص سعر للـ Product ID.
-    unique = {}
-
-    for item in catalog:
-        product_id = item["product_id"]
-
-        if (
-            product_id not in unique
-            or item["store_price"] < unique[product_id]["store_price"]
-        ):
-            unique[product_id] = item
-
-    games = list(unique.values())
-
-    games.sort(
-        key=lambda item: (
-            item["store_price"],
-            item["game_name"].lower()
-        )
-    )
-
-    BUDGET_CACHE["updated_at"] = time.monotonic()
-    BUDGET_CACHE["games"] = games
-
-    print(
-        "BUDGET CATALOG READY:",
-        len(games),
-        "games"
-    )
-
-    return games
-
-
-def get_budget_games(budget_iqd, limit=8):
-
-    now = time.monotonic()
-
-    if (
-        not BUDGET_CACHE["games"]
-        or now - BUDGET_CACHE["updated_at"] > BUDGET_CACHE_TTL
-    ):
-        games = build_budget_catalog()
-    else:
-        games = BUDGET_CACHE["games"]
-
-    matches = [
-        (
-            item["store_price"],
-            item["game_name"],
-            item["product_id"],
-            item["original_price"],
-            item["turkey_price"],
-            item["end_date"]
-        )
-        for item in games
-        if item["store_price"] <= budget_iqd
-    ]
-
-    # نختار أسعار متنوعة حتى لا تكون القائمة كلها بنفس السعر.
-    return matches[:limit]
-
-
 # =========================================================
 # معلومات اللعبة من Product ID
 # =========================================================
@@ -1070,91 +670,6 @@ def search_xbox_games(
             break
 
     return unique
-
-
-# =========================================================
-# حل نتيجة البحث بشكل موثوق
-# =========================================================
-
-def resolve_search_result(product_id, result_name=None):
-
-    product_id = str(product_id).upper()
-
-    # إذا البيانات موجودة بالكاش نستخدمها مباشرة
-    cached = SEARCH_RESULT_CACHE.get(product_id)
-
-    if cached:
-        return cached
-
-    # المحاولة الأولى: Product ID المباشر
-    try:
-
-        info = get_game_info_by_product_id(product_id)
-        SEARCH_RESULT_CACHE[product_id] = info
-        return info
-
-    except Exception as first_error:
-
-        print(
-            "DIRECT PRODUCT LOOKUP FAILED:",
-            product_id,
-            repr(first_error)
-        )
-
-    # بعض نتائج autosuggest تكون IDs لنسخة/إضافة
-    # بينما الاسم نفسه يحتوي على المنتج الأساسي.
-    # نعيد البحث بالاسم ونجرّب كل IDs الناتجة.
-    if result_name:
-
-        try:
-
-            alternatives = search_xbox_games(
-                result_name,
-                top=10
-            )
-
-            tried = set()
-
-            for alternative_id, alternative_name in alternatives:
-
-                alternative_id = alternative_id.upper()
-
-                if alternative_id in tried:
-                    continue
-
-                tried.add(alternative_id)
-
-                try:
-
-                    info = get_game_info_by_product_id(
-                        alternative_id
-                    )
-
-                    SEARCH_RESULT_CACHE[product_id] = info
-                    SEARCH_RESULT_CACHE[alternative_id] = info
-
-                    return info
-
-                except Exception as alternative_error:
-
-                    print(
-                        "ALTERNATIVE PRODUCT FAILED:",
-                        alternative_id,
-                        alternative_name,
-                        repr(alternative_error)
-                    )
-
-        except Exception as search_error:
-
-            print(
-                "ALTERNATIVE SEARCH FAILED:",
-                result_name,
-                repr(search_error)
-            )
-
-    raise Exception(
-        "ماكدرت أجيب سعر نتيجة البحث"
-    )
 
 
 # =========================================================
@@ -1579,10 +1094,7 @@ def get_remaining_text(end_date):
 
 def get_game_keyboard(
     product_id,
-    active,
-    show_back=False,
-    has_discount=False,
-    is_favorite=False
+    active
 ):
 
     buttons = [
@@ -1591,62 +1103,34 @@ def get_game_keyboard(
                 "🛒 اطلب الآن",
                 callback_data=f"order:{product_id}"
             )
-        ],
-        [
-            InlineKeyboardButton(
-                "📋 نسخ السعر",
-                callback_data=f"copy:{product_id}"
-            ),
-            InlineKeyboardButton(
-                "💛 إزالة من المفضلة" if is_favorite else "⭐ أضف للمفضلة",
-                callback_data=f"favremove:{product_id}" if is_favorite else f"favadd:{product_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "⭐ ألعابي المفضلة",
-                callback_data="favlist"
-            )
         ]
     ]
 
-    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة.
-    if not has_discount:
-
-        if active:
-
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "🔕 إلغاء التنبيه",
-                        callback_data=f"cancel:{product_id}"
-                    )
-                ]
-            )
-
-        else:
-
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        "🔔 نبهني إذا نزل السعر",
-                        callback_data=f"alert:{product_id}"
-                    )
-                ]
-            )
-
-    if show_back:
+    if active:
 
         buttons.append(
             [
                 InlineKeyboardButton(
-                    "🔙 رجوع للإصدارات",
-                    callback_data="backsearch"
+                    "🔕 إلغاء التنبيه",
+                    callback_data=f"cancel:{product_id}"
                 )
             ]
         )
 
-    return InlineKeyboardMarkup(buttons)
+    else:
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "🔔 نبهني إذا نزل السعر",
+                    callback_data=f"alert:{product_id}"
+                )
+            ]
+        )
+
+    return InlineKeyboardMarkup(
+        buttons
+    )
 
 
 # =========================================================
@@ -1660,27 +1144,15 @@ def create_game_result(
     turkey_price,
     original_price,
     end_date,
-    reference,
-    show_back=False
+    reference
 ):
 
     store_price = calculate_price(
         turkey_price
     )
 
-    # create_game_result() يُستخدم من الرسائل العادية ومن ضغط الأزرار.
-    # في الرسالة العادية يكون لدينا Update.effective_user،
-    # أما CallbackQuery فالمستخدم موجود في from_user.
-    user = getattr(update, "effective_user", None)
-
-    if user is None:
-        user = getattr(update, "from_user", None)
-
-    if user is None:
-        raise Exception("ماكدرت أحدد المستخدم")
-
     save_last_request(
-        user.id,
+        update.effective_user.id,
         product_id,
         game_name,
         reference,
@@ -1753,13 +1225,7 @@ def create_game_result(
     keyboard = get_game_keyboard(
         product_id,
         alert_exists(
-            user.id,
-            product_id
-        ),
-        show_back,
-        discount_percent is not None,
-        favorite_exists(
-            user.id,
+            update.effective_user.id,
             product_id
         )
     )
@@ -1778,27 +1244,9 @@ async def start(
 
     if update.message:
 
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "💰 شكد أگدر أشتري؟",
-                    callback_data="budgetmenu"
-                )
-            ]
-        ]
-
-        if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
-            buttons.append([
-                InlineKeyboardButton(
-                    "🧾 سجل الطلبات",
-                    callback_data="adminorders"
-                )
-            ])
-
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
-            "أو اكتب اسم اللعبة 🔍",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            "أو اكتب اسم اللعبة 🔍"
         )
 
 
@@ -1817,64 +1265,6 @@ async def my_id(
             f"🆔 Telegram ID مالك:\n\n"
             f"{update.effective_user.id}"
         )
-
-
-# =========================================================
-# سجل الطلبات - أمر الأدمن
-# =========================================================
-
-async def admin_orders_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message:
-        return
-
-    if not ADMIN_CHAT_ID or str(update.effective_user.id) != str(ADMIN_CHAT_ID):
-        await update.message.reply_text(
-            "❌ هذا الأمر للأدمن فقط."
-        )
-        return
-
-    orders = get_orders(50)
-
-    if not orders:
-        await update.message.reply_text(
-            "🧾 سجل الطلبات\n\nماكو طلبات مسجلة حالياً."
-        )
-        return
-
-    lines = ["🧾 <b>سجل الطلبات</b>", ""]
-
-    for order_id, customer_name, game_name, price, created_at in orders:
-        price_text = (
-            format_store_price(price)
-            if price is not None
-            else "غير معروف"
-        )
-        lines.append(
-            f"<b>#{order_id}</b> 🎮 {game_name[:45]}\n"
-            f"👤 {customer_name}\n"
-            f"💰 {price_text} 🇮🇶\n"
-            f"🕐 {created_at}"
-        )
-        lines.append("────────────")
-
-    lines.append("\n📌 آخر 50 طلب فقط")
-
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔄 تحديث",
-                    callback_data="adminorders"
-                )
-            ]
-        ])
-    )
 
 
 # =========================================================
@@ -1955,89 +1345,33 @@ async def handle_message(
 
             return
 
-        # نفحص النتائج قبل عرضها، لكن نحتفظ باسم النتيجة.
-        # إذا كان Product ID المباشر غير قابل للتسعير،
-        # resolve_search_result يبحث عن النسخة القابلة للتسعير.
-        valid_results = []
-
-        for product_id, result_name in results:
-
-            try:
-
-                info = await asyncio.to_thread(
-                    resolve_search_result,
-                    product_id,
-                    result_name
-                )
-
-                resolved_product_id = info[0]
-                resolved_name = info[1]
-
-                SEARCH_RESULT_CACHE[product_id] = info
-                SEARCH_RESULT_CACHE[resolved_product_id] = info
-
-                valid_results.append(
-                    (
-                        product_id,
-                        result_name
-                    )
-                )
-
-            except Exception as error:
-
-                print(
-                    "SEARCH RESULT SKIPPED:",
-                    product_id,
-                    result_name,
-                    repr(error)
-                )
-
-        if not valid_results:
-
-            await processing.edit_text(
-                "❌ لكيت نتائج للعبة، لكن ماكو سعر متاح "
-                "إلها حالياً.\n\n"
-                "جرب اسم اللعبة مرة ثانية أو أرسل رابط Xbox Store."
-            )
-
-            return
-
         # =================================================
         # نتيجة واحدة
         # =================================================
 
-        if len(valid_results) == 1:
+        if len(results) == 1:
 
-            product_id, result_name = valid_results[0]
-
-            info = SEARCH_RESULT_CACHE.get(
-                product_id
-            )
-
-            if not info:
-
-                info = await asyncio.to_thread(
-                    resolve_search_result,
-                    product_id,
-                    result_name
-                )
+            product_id, result_name = results[0]
 
             (
-                resolved_product_id,
+                product_id,
                 game_name,
                 turkey_price,
                 original_price,
                 end_date
-            ) = info
+            ) = await asyncio.to_thread(
+                get_game_info_by_product_id,
+                product_id
+            )
 
             message, keyboard = create_game_result(
                 update,
-                resolved_product_id,
+                product_id,
                 game_name,
                 turkey_price,
                 original_price,
                 end_date,
-                f"xboxid:{resolved_product_id}"
+                f"xboxid:{product_id}"
             )
 
             await processing.edit_text(
@@ -2052,15 +1386,9 @@ async def handle_message(
         # أكثر من نتيجة
         # =================================================
 
-        # نحفظ آخر قائمة نتائج لهذا المستخدم حتى يقدر يرجع لها
-        # بعد فتح أي إصدار.
-        SEARCH_SELECTIONS[update.effective_user.id] = list(
-            valid_results
-        )
-
         buttons = []
 
-        for product_id, result_name in valid_results:
+        for product_id, result_name in results:
 
             buttons.append(
                 [
@@ -2091,7 +1419,8 @@ async def handle_message(
 
         await processing.edit_text(
             "❌ صار خطأ أثناء جلب معلومات اللعبة.\n\n"
-            "تأكد من الاسم أو الرابط وجرب مرة ثانية."
+            "تأكد من الاسم أو الرابط "
+            "وجرب مرة ثانية."
         )
 
 
@@ -2191,60 +1520,6 @@ async def check_price_alerts(
 
 
 # =========================================================
-# سجل الطلبات
-# =========================================================
-
-def save_order(
-    user_id,
-    customer_name,
-    game_name,
-    product_id,
-    price
-):
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO orders
-        (user_id, customer_name, game_name, product_id, price)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            user_id,
-            customer_name,
-            game_name,
-            product_id,
-            price
-        )
-    )
-
-    connection.commit()
-    connection.close()
-
-
-def get_orders(limit=50):
-
-    connection = sqlite3.connect(DB_FILE)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        """
-        SELECT id, customer_name, game_name, price, created_at
-        FROM orders
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (limit,)
-    )
-
-    rows = cursor.fetchall()
-    connection.close()
-    return rows
-
-
-# =========================================================
 # حلقة التنبيهات
 # =========================================================
 
@@ -2296,278 +1571,6 @@ async def button_handler(
     user_id = user.id
 
     # =====================================================
-    # 💰 شكد أگدر أشتري؟
-    # =====================================================
-
-    if data == "budgetmenu":
-
-        await query.answer()
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("💵 5 آلاف", callback_data="budget:5000"),
-                InlineKeyboardButton("💵 10 آلاف", callback_data="budget:10000")
-            ],
-            [
-                InlineKeyboardButton("💵 15 ألف", callback_data="budget:15000"),
-                InlineKeyboardButton("💵 20 ألف", callback_data="budget:20000")
-            ],
-            [
-                InlineKeyboardButton("💵 30 ألف", callback_data="budget:30000"),
-                InlineKeyboardButton("💵 50 ألف", callback_data="budget:50000")
-            ],
-            [
-                InlineKeyboardButton("🏠 الرئيسية", callback_data="home")
-            ]
-        ])
-
-        await query.edit_message_text(
-            "💰 <b>شكد ميزانيتك؟</b>\n\n"
-            "اختار المبلغ، وأنا أبحث لك عن ألعاب سعرها ضمن ميزانيتك 👇",
-            parse_mode="HTML",
-            reply_markup=keyboard
-        )
-        return
-
-    if data.startswith("budget:"):
-
-        try:
-            budget_iqd = int(data.split(":", 1)[1])
-        except Exception:
-            await query.answer("❌ الميزانية غير صحيحة", show_alert=True)
-            return
-
-        await query.answer("⏳ دا أبحث عن الألعاب...", show_alert=False)
-
-        try:
-            games = await asyncio.to_thread(
-                get_budget_games,
-                budget_iqd,
-                8
-            )
-        except Exception as error:
-            print("BUDGET ERROR:", repr(error))
-            games = []
-
-        if not games:
-            await query.edit_message_text(
-                "😕 ما لكيت ألعاب ضمن هالميزانية حالياً.\n\n"
-                "جرب ميزانية أعلى.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💰 تغيير الميزانية", callback_data="budgetmenu")],
-                    [InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]
-                ])
-            )
-            return
-
-        lines = [
-            f"💰 <b>ألعاب ضمن ميزانية {format_store_price(budget_iqd)}</b>",
-            "",
-            "اختار لعبة حتى أشوف لك تفاصيلها 👇"
-        ]
-
-        buttons = []
-
-        for store_price, game_name, product_id, original_price, turkey_price, end_date in games:
-            lines.append(
-                f"🎮 {game_name[:42]} — <b>{format_store_price(store_price)}</b>"
-            )
-            buttons.append([
-                InlineKeyboardButton(
-                    f"🎮 {game_name[:45]} — {format_store_price(store_price)}",
-                    callback_data=f"budgetopen:{product_id}"
-                )
-            ])
-
-        buttons.append([
-            InlineKeyboardButton("💰 تغيير الميزانية", callback_data="budgetmenu")
-        ])
-        buttons.append([
-            InlineKeyboardButton("🏠 الرئيسية", callback_data="home")
-        ])
-
-        await query.edit_message_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return
-
-    if data.startswith("budgetopen:"):
-
-        product_id = data.split(":", 1)[1].upper()
-
-        processing = query.message
-
-        try:
-            (
-                resolved_id,
-                game_name,
-                turkey_price,
-                original_price,
-                end_date
-            ) = await asyncio.to_thread(
-                get_game_info_by_product_id,
-                product_id
-            )
-
-            message, keyboard = create_game_result(
-                update,
-                resolved_id,
-                game_name,
-                turkey_price,
-                original_price,
-                end_date,
-                f"xboxid:{resolved_id}"
-            )
-
-            await query.edit_message_text(
-                message,
-                parse_mode="HTML",
-                reply_markup=keyboard
-            )
-
-        except Exception as error:
-            print("BUDGET OPEN ERROR:", repr(error))
-            await query.edit_message_text(
-                "❌ ماكدرت أجيب تفاصيل اللعبة.\n\n"
-                "جرب لعبة ثانية.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💰 رجوع للميزانية", callback_data="budgetmenu")],
-                    [InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]
-                ])
-            )
-
-        return
-
-    # =====================================================
-    # سجل الطلبات - للأدمن فقط
-    # =====================================================
-
-    if data == "adminorders":
-
-        if not ADMIN_CHAT_ID or str(user_id) != str(ADMIN_CHAT_ID):
-            await query.answer(
-                "❌ هذا القسم للأدمن فقط",
-                show_alert=True
-            )
-            return
-
-        orders = get_orders(50)
-
-        if not orders:
-            await query.answer()
-            await query.edit_message_text(
-                "🧾 <b>سجل الطلبات</b>\n\n"
-                "ماكو طلبات مسجلة حالياً.",
-                parse_mode="HTML"
-            )
-            return
-
-        lines = ["🧾 <b>سجل الطلبات</b>", ""]
-
-        for order_id, customer_name, game_name, price, created_at in orders:
-            price_text = (
-                format_store_price(price)
-                if price is not None
-                else "غير معروف"
-            )
-            lines.append(
-                f"<b>#{order_id}</b> 🎮 {game_name[:45]}\n"
-                f"👤 {customer_name}\n"
-                f"💰 {price_text} 🇮🇶\n"
-                f"🕐 {created_at}"
-            )
-            lines.append("────────────")
-
-        lines.append("\n📌 آخر 50 طلب فقط")
-
-        await query.answer()
-        await query.edit_message_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🔄 تحديث",
-                        callback_data="adminorders"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🏠 الرئيسية",
-                        callback_data="home"
-                    )
-                ]
-            ])
-        )
-        return
-
-    # =====================================================
-    # الرئيسية - للمستخدمين
-    # =====================================================
-
-    if data == "home":
-
-        await query.answer()
-
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "💰 شكد أگدر أشتري؟",
-                    callback_data="budgetmenu"
-                )
-            ]
-        ]
-
-        if ADMIN_CHAT_ID and str(user_id) == str(ADMIN_CHAT_ID):
-            buttons.append([
-                InlineKeyboardButton(
-                    "🧾 سجل الطلبات",
-                    callback_data="adminorders"
-                )
-            ])
-
-        await query.edit_message_text(
-            "🎮 <b>SA STORE</b>\n\n"
-            "أرسل رابط لعبة من Xbox Store\n"
-            "أو اكتب اسم اللعبة 🔍",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return
-
-    # =====================================================
-    # الرئيسية - للأدمن
-    # =====================================================
-
-    if data == "adminhome":
-
-        if not ADMIN_CHAT_ID or str(user_id) != str(ADMIN_CHAT_ID):
-            await query.answer(
-                "❌ هذا القسم للأدمن فقط",
-                show_alert=True
-            )
-            return
-
-        await query.answer()
-        await query.edit_message_text(
-            "🎮 <b>SA STORE</b>\n\n"
-            "أرسل رابط لعبة من Xbox Store\n"
-            "أو اكتب اسم اللعبة 🔍",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🧾 سجل الطلبات",
-                        callback_data="adminorders"
-                    )
-                ]
-            ])
-        )
-        return
-
-    # =====================================================
     # اختيار نتيجة البحث
     # =====================================================
 
@@ -2578,7 +1581,7 @@ async def button_handler(
         product_id = data.split(
             ":",
             1
-        )[1].upper()
+        )[1]
 
         await query.answer(
             "⏳ جاري جلب السعر..."
@@ -2586,38 +1589,25 @@ async def button_handler(
 
         try:
 
-            # نستخدم الكاش أولاً، وإذا البوت أعاد التشغيل
-            # نستخدم Product ID مباشرة.
-            info = SEARCH_RESULT_CACHE.get(
-                product_id
-            )
-
-            if info is None:
-
-                info = await asyncio.to_thread(
-                    get_game_info_by_product_id,
-                    product_id
-                )
-
-                SEARCH_RESULT_CACHE[product_id] = info
-
             (
-                resolved_product_id,
+                product_id,
                 game_name,
                 turkey_price,
                 original_price,
                 end_date
-            ) = info
+            ) = await asyncio.to_thread(
+                get_game_info_by_product_id,
+                product_id
+            )
 
             message, keyboard = create_game_result(
                 query,
-                resolved_product_id,
+                product_id,
                 game_name,
                 turkey_price,
                 original_price,
                 end_date,
-                f"xboxid:{resolved_product_id}",
-                show_back=True
+                f"xboxid:{product_id}"
             )
 
             await query.edit_message_text(
@@ -2630,281 +1620,12 @@ async def button_handler(
 
             print(
                 "SEARCH SELECT ERROR:",
-                product_id,
                 repr(error)
             )
 
             await query.edit_message_text(
                 "❌ ماكدرت أجيب سعر اللعبة، "
                 "حاول مرة ثانية."
-            )
-
-        return
-
-    # =====================================================
-    # الرجوع إلى قائمة إصدارات اللعبة
-    # =====================================================
-
-    if data == "backsearch":
-
-        results = SEARCH_SELECTIONS.get(
-            user_id
-        )
-
-        if not results:
-
-            await query.answer(
-                "❌ قائمة الإصدارات غير متوفرة، ابحث عن اللعبة مرة ثانية.",
-                show_alert=True
-            )
-
-            return
-
-        buttons = []
-
-        for result_product_id, result_name in results:
-
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        f"🎮 {result_name[:50]}",
-                        callback_data=(
-                            f"searchselect:{result_product_id}"
-                        )
-                    )
-                ]
-            )
-
-        await query.answer(
-            "🔙 رجعناك لقائمة الإصدارات"
-        )
-
-        await query.edit_message_text(
-            "🔍 <b>لكيت أكثر من نتيجة:</b>\n\n"
-            "اختار اللعبة المطلوبة 👇",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                buttons
-            )
-        )
-
-        return
-
-    # =====================================================
-    # نسخ السعر / معلومات اللعبة
-    # =====================================================
-
-    if data.startswith("copy:"):
-
-        product_id = data.split(":", 1)[1]
-        last_request = get_last_request(user_id, product_id)
-
-        if not last_request:
-            await query.answer(
-                "❌ معلومات اللعبة غير متوفرة، ابحث عنها مرة ثانية.",
-                show_alert=True
-            )
-            return
-
-        game_name, url, current_price = last_request
-
-        copy_text = (
-            f"🎮 {game_name}\n"
-            f"💰 السعر: {format_store_price(current_price)} 🇮🇶"
-        )
-
-        try:
-            info = await asyncio.to_thread(
-                get_game_info_by_product_id,
-                product_id
-            )
-
-            _, _, turkey_price, original_price, _ = info
-
-            if (
-                original_price is not None
-                and original_price > turkey_price
-            ):
-                discount_percent = round(
-                    ((original_price - turkey_price) / original_price) * 100
-                )
-                copy_text += f"\n📉 الخصم: {discount_percent}%"
-        except Exception:
-            pass
-
-        await query.answer("📋 تم تجهيز معلومات اللعبة")
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=copy_text
-        )
-        return
-
-    # =====================================================
-    # إضافة للمفضلة
-    # =====================================================
-
-    if data.startswith("favadd:"):
-
-        product_id = data.split(":", 1)[1]
-        last_request = get_last_request(user_id, product_id)
-
-        if not last_request:
-            await query.answer(
-                "❌ ابحث عن اللعبة مرة ثانية.",
-                show_alert=True
-            )
-            return
-
-        game_name, url, current_price = last_request
-        add_favorite(user_id, product_id, game_name, url, current_price)
-
-        has_discount = False
-
-        try:
-            info = await asyncio.to_thread(
-                get_game_info_by_product_id,
-                product_id
-            )
-            _, _, turkey_price, original_price, _ = info
-            has_discount = (
-                original_price is not None
-                and original_price > turkey_price
-            )
-        except Exception:
-            pass
-
-        await query.answer("⭐ تمت إضافة اللعبة للمفضلة")
-
-        await query.edit_message_reply_markup(
-            reply_markup=get_game_keyboard(
-                product_id,
-                alert_exists(user_id, product_id),
-                show_back=user_id in SEARCH_SELECTIONS,
-                has_discount=has_discount,
-                is_favorite=True
-            )
-        )
-        return
-
-    # =====================================================
-    # إزالة من المفضلة
-    # =====================================================
-
-    if data.startswith("favremove:"):
-
-        product_id = data.split(":", 1)[1]
-        remove_favorite(user_id, product_id)
-
-        await query.answer("💔 تمت إزالة اللعبة من المفضلة")
-
-        # نعيد جلب معلومات آخر طلب حتى نعرف هل عليها تخفيض أم لا.
-        last_request = get_last_request(user_id, product_id)
-        has_discount = False
-
-        if last_request:
-            try:
-                info = await asyncio.to_thread(
-                    get_game_info_by_product_id,
-                    product_id
-                )
-                _, _, turkey_price, original_price, _ = info
-                has_discount = (
-                    original_price is not None
-                    and original_price > turkey_price
-                )
-            except Exception:
-                pass
-
-        await query.edit_message_reply_markup(
-            reply_markup=get_game_keyboard(
-                product_id,
-                alert_exists(user_id, product_id),
-                show_back=user_id in SEARCH_SELECTIONS,
-                has_discount=has_discount,
-                is_favorite=False
-            )
-        )
-        return
-
-    # =====================================================
-    # قائمة المفضلة
-    # =====================================================
-
-    if data == "favlist":
-
-        favorites = get_favorites(user_id)
-
-        if not favorites:
-            await query.answer(
-                "⭐ ما عندك ألعاب بالمفضلة حالياً.",
-                show_alert=True
-            )
-            return
-
-        buttons = []
-
-        for product_id, game_name, url, current_price in favorites:
-            buttons.append([
-                InlineKeyboardButton(
-                    f"⭐ {game_name[:50]}",
-                    callback_data=f"favopen:{product_id}"
-                )
-            ])
-
-        await query.answer()
-        await query.edit_message_text(
-            "⭐ <b>ألعابك المفضلة:</b>\n\n"
-            "اختار لعبة حتى تشوف سعرها الحالي 👇",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return
-
-    # =====================================================
-    # فتح لعبة من المفضلة
-    # =====================================================
-
-    if data.startswith("favopen:"):
-
-        product_id = data.split(":", 1)[1]
-
-        await query.answer("⏳ جاري تحديث السعر...")
-
-        try:
-            info = await asyncio.to_thread(
-                get_game_info_by_product_id,
-                product_id
-            )
-
-            (
-                resolved_product_id,
-                game_name,
-                turkey_price,
-                original_price,
-                end_date
-            ) = info
-
-            message, keyboard = create_game_result(
-                query,
-                resolved_product_id,
-                game_name,
-                turkey_price,
-                original_price,
-                end_date,
-                f"xboxid:{resolved_product_id}",
-                show_back=False
-            )
-
-            await query.edit_message_text(
-                message,
-                parse_mode="HTML",
-                reply_markup=keyboard
-            )
-
-        except Exception as error:
-            print("FAVORITE OPEN ERROR:", product_id, repr(error))
-            await query.edit_message_text(
-                "❌ ماكدرت أحدث سعر اللعبة، حاول مرة ثانية."
             )
 
         return
@@ -2968,10 +1689,7 @@ async def button_handler(
         await query.edit_message_reply_markup(
             reply_markup=get_game_keyboard(
                 product_id,
-                True,
-                show_back=user_id in SEARCH_SELECTIONS,
-                has_discount=False,
-                is_favorite=favorite_exists(user_id, product_id)
+                True
             )
         )
 
@@ -3017,10 +1735,7 @@ async def button_handler(
             await query.edit_message_reply_markup(
                 reply_markup=get_game_keyboard(
                     product_id,
-                    False,
-                    show_back=True,
-                    has_discount=False,
-                    is_favorite=favorite_exists(user_id, product_id)
+                    False
                 )
             )
 
@@ -3074,14 +1789,6 @@ async def button_handler(
                 user.full_name
                 or "بدون اسم"
             )
-
-        save_order(
-            user_id,
-            customer_name,
-            game_name,
-            product_id,
-            current_price
-        )
 
         price_text = ""
 
@@ -3195,13 +1902,6 @@ def main():
         CommandHandler(
             "id",
             my_id
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "orders",
-            admin_orders_command
         )
     )
 
