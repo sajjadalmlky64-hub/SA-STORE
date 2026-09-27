@@ -584,6 +584,199 @@ def best_price(items):
     return price, None, None
 
 
+
+# =========================================================
+# 💰 ألعاب حسب الميزانية
+# =========================================================
+
+BUDGET_CACHE = {}
+
+
+def get_budget_product_ids(limit_per_list=60):
+
+    lists = [
+        "Computed/TopPaid",
+        "Computed/Deal",
+        "Computed/New",
+    ]
+
+    ids = []
+    seen = set()
+
+    for list_name in lists:
+
+        url = (
+            "https://reco-public.rec.mp.microsoft.com/"
+            "channels/Reco/V8.0/Lists/api/list/"
+            + list_name
+        )
+
+        params = {
+            "market": "TR",
+            "language": "tr-TR",
+            "itemType": "Game",
+            "deviceFamily": "Windows.Xbox",
+            "count": str(limit_per_list),
+            "skipItems": "0"
+        }
+
+        response = SESSION.get(
+            url,
+            params=params,
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        def walk(value):
+
+            found = []
+
+            if isinstance(value, dict):
+
+                for key in (
+                    "ProductId",
+                    "ProductID",
+                    "productId",
+                    "productID",
+                    "BigId",
+                    "bigId",
+                    "Id",
+                    "id"
+                ):
+                    candidate = value.get(key)
+                    if candidate:
+                        text = str(candidate).strip().upper()
+                        if 8 <= len(text) <= 20 and text.isalnum():
+                            found.append(text)
+                            break
+
+                for child in value.values():
+                    found.extend(walk(child))
+
+            elif isinstance(value, list):
+
+                for child in value:
+                    found.extend(walk(child))
+
+            return found
+
+        for product_id in walk(data):
+
+            if product_id in seen:
+                continue
+
+            seen.add(product_id)
+            ids.append(product_id)
+
+    return ids
+
+
+def get_products_batch(product_ids):
+
+    if not product_ids:
+        return []
+
+    url = (
+        "https://displaycatalog.mp.microsoft.com/"
+        "v7.0/products"
+    )
+
+    params = {
+        "bigIds": ",".join(product_ids),
+        "market": "TR",
+        "languages": "tr-TR,en-US",
+        "fieldsTemplate": "Details",
+        "actionFilter": "Browse"
+    }
+
+    response = SESSION.get(
+        url,
+        params=params,
+        timeout=45
+    )
+    response.raise_for_status()
+
+    data = response.json()
+    products = data.get("Products", [])
+
+    if isinstance(products, list):
+        return products
+
+    return []
+
+
+def get_budget_games(budget_iqd, limit=8):
+
+    # نجرب قائمة محفوظة خلال نفس تشغيل البوت أولاً.
+    ids = get_budget_product_ids(60)
+
+    if not ids:
+        return []
+
+    results = []
+
+    # Microsoft يقبل أكثر من Product ID في طلب واحد، فنقسمها دفعات.
+    for start in range(0, len(ids), 20):
+
+        batch_ids = ids[start:start + 20]
+
+        try:
+            products = get_products_batch(batch_ids)
+        except Exception as error:
+            print("BUDGET BATCH ERROR:", repr(error))
+            continue
+
+        for product in products:
+
+            try:
+                product_id = str(
+                    product.get("ProductId")
+                    or product.get("ProductID")
+                    or ""
+                ).upper()
+
+                if not product_id:
+                    continue
+
+                game_name = get_game_name(product)
+                prices = get_prices(product)
+                turkey_price, original_price, end_date = best_price(prices)
+
+                if turkey_price is None:
+                    continue
+
+                store_price = calculate_price(turkey_price)
+
+                if store_price <= budget_iqd:
+                    results.append((
+                        store_price,
+                        game_name,
+                        product_id,
+                        original_price,
+                        turkey_price,
+                        end_date
+                    ))
+
+            except Exception as error:
+                print("BUDGET PRODUCT ERROR:", repr(error))
+
+    # إزالة التكرار وترتيب الأرخص أولاً.
+    unique = {}
+
+    for item in results:
+        product_id = item[2]
+        if product_id not in unique or item[0] < unique[product_id][0]:
+            unique[product_id] = item
+
+    results = sorted(
+        unique.values(),
+        key=lambda item: (item[0], item[1].lower())
+    )
+
+    return results[:limit]
+
+
 # =========================================================
 # معلومات اللعبة من Product ID
 # =========================================================
@@ -1484,22 +1677,27 @@ async def start(
 
     if update.message:
 
-        keyboard = None
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "💰 شكد أگدر أشتري؟",
+                    callback_data="budgetmenu"
+                )
+            ]
+        ]
 
         if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🧾 سجل الطلبات",
-                        callback_data="adminorders"
-                    )
-                ]
+            buttons.append([
+                InlineKeyboardButton(
+                    "🧾 سجل الطلبات",
+                    callback_data="adminorders"
+                )
             ])
 
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
             "أو اكتب اسم اللعبة 🔍",
-            reply_markup=keyboard
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
 
 
@@ -1995,6 +2193,151 @@ async def button_handler(
 
     user = query.from_user
     user_id = user.id
+
+    # =====================================================
+    # 💰 شكد أگدر أشتري؟
+    # =====================================================
+
+    if data == "budgetmenu":
+
+        await query.answer()
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("💵 5 آلاف", callback_data="budget:5000"),
+                InlineKeyboardButton("💵 10 آلاف", callback_data="budget:10000")
+            ],
+            [
+                InlineKeyboardButton("💵 15 ألف", callback_data="budget:15000"),
+                InlineKeyboardButton("💵 20 ألف", callback_data="budget:20000")
+            ],
+            [
+                InlineKeyboardButton("💵 30 ألف", callback_data="budget:30000"),
+                InlineKeyboardButton("💵 50 ألف", callback_data="budget:50000")
+            ],
+            [
+                InlineKeyboardButton("🏠 الرئيسية", callback_data="adminhome")
+            ]
+        ])
+
+        await query.edit_message_text(
+            "💰 <b>شكد ميزانيتك؟</b>\n\n"
+            "اختار المبلغ، وأنا أبحث لك عن ألعاب سعرها ضمن ميزانيتك 👇",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        return
+
+    if data.startswith("budget:"):
+
+        try:
+            budget_iqd = int(data.split(":", 1)[1])
+        except Exception:
+            await query.answer("❌ الميزانية غير صحيحة", show_alert=True)
+            return
+
+        await query.answer("⏳ دا أبحث عن الألعاب...", show_alert=False)
+
+        try:
+            games = await asyncio.to_thread(
+                get_budget_games,
+                budget_iqd,
+                8
+            )
+        except Exception as error:
+            print("BUDGET ERROR:", repr(error))
+            games = []
+
+        if not games:
+            await query.edit_message_text(
+                "😕 ما لكيت ألعاب ضمن هالميزانية حالياً.\n\n"
+                "جرب ميزانية أعلى.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💰 تغيير الميزانية", callback_data="budgetmenu")],
+                    [InlineKeyboardButton("🏠 الرئيسية", callback_data="adminhome")]
+                ])
+            )
+            return
+
+        lines = [
+            f"💰 <b>ألعاب ضمن ميزانية {format_store_price(budget_iqd)}</b>",
+            "",
+            "اختار لعبة حتى أشوف لك تفاصيلها 👇"
+        ]
+
+        buttons = []
+
+        for store_price, game_name, product_id, original_price, turkey_price, end_date in games:
+            lines.append(
+                f"🎮 {game_name[:42]} — <b>{format_store_price(store_price)}</b>"
+            )
+            buttons.append([
+                InlineKeyboardButton(
+                    f"🎮 {game_name[:45]} — {format_store_price(store_price)}",
+                    callback_data=f"budgetopen:{product_id}"
+                )
+            ])
+
+        buttons.append([
+            InlineKeyboardButton("💰 تغيير الميزانية", callback_data="budgetmenu")
+        ])
+        buttons.append([
+            InlineKeyboardButton("🏠 الرئيسية", callback_data="adminhome")
+        ])
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if data.startswith("budgetopen:"):
+
+        product_id = data.split(":", 1)[1].upper()
+
+        processing = query.message
+
+        try:
+            (
+                resolved_id,
+                game_name,
+                turkey_price,
+                original_price,
+                end_date
+            ) = await asyncio.to_thread(
+                get_game_info_by_product_id,
+                product_id
+            )
+
+            message, keyboard = create_game_result(
+                update,
+                resolved_id,
+                game_name,
+                turkey_price,
+                original_price,
+                end_date,
+                f"xboxid:{resolved_id}"
+            )
+
+            await query.edit_message_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+        except Exception as error:
+            print("BUDGET OPEN ERROR:", repr(error))
+            await query.edit_message_text(
+                "❌ ماكدرت أجيب تفاصيل اللعبة.\n\n"
+                "جرب لعبة ثانية.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💰 رجوع للميزانية", callback_data="budgetmenu")],
+                    [InlineKeyboardButton("🏠 الرئيسية", callback_data="adminhome")]
+                ])
+            )
+
+        return
 
     # =====================================================
     # سجل الطلبات - للأدمن فقط
