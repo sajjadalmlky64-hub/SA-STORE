@@ -36,7 +36,10 @@ ORDER_URL = "https://t.me/Sijadsa"
 DB_FILE = "price_alerts.db"
 
 # 🇦🇷 إعدادات سعر الأرجنتين
-ARGENTINA_USD_TO_IQD = 1600
+# 1000 ARS = 6.38 USD
+# 1 USD = 1660 IQD
+ARGENTINA_ARS_PER_1000_USD = 6.38
+ARGENTINA_USD_TO_IQD = 1660
 ARGENTINA_PROFIT_IQD = 3000
 
 if not BOT_TOKEN:
@@ -889,200 +892,196 @@ def round_customer_price(price):
     return max(1000, int((price + 500) // 1000) * 1000)
 
 
-def _normalize_xbox_now_text(html):
-
-    # نفك HTML entities ونحذف السكربتات/الستايلات حتى يصير
-    # البحث عن قسم Argentina أكثر ثباتاً.
-    from html import unescape
-
-    html = unescape(html or "")
-
-    html = re.sub(
-        r"<script.*?</script>|<style.*?</style>",
-        " ",
-        html,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-
-    # نحافظ على فواصل بسيطة بين عناصر HTML.
-    html = re.sub(r"<[^>]+>", " ", html)
-    html = re.sub(r"\s+", " ", html)
-
-    return html.strip()
-
-
-def _extract_xbox_now_game_links(html, game_name):
-
-    # Xbox-Now يستخدم روابط نسبية، وأحياناً قد تظهر كرابط مطلق.
-    links = re.findall(
-        r'href=["\'](?:https://www\.xbox-now\.com)?(/en/game/\d+/[^"\'?#]+)',
-        html or "",
-        flags=re.IGNORECASE
-    )
-
-    if not links:
-        return []
-
-    # تطبيع اسم اللعبة إلى كلمات بسيطة للمطابقة.
-    wanted = re.findall(
-        r"[a-z0-9]+",
-        game_name.lower()
-    )
-
-    unique = []
-    seen = set()
-
-    for path in links:
-
-        path = path.rstrip("/")
-
-        if path in seen:
-            continue
-
-        seen.add(path)
-
-        slug = path.rsplit("/", 1)[-1].lower()
-        slug_words = re.findall(r"[a-z0-9]+", slug)
-
-        score = 0
-
-        for word in wanted:
-            if word in slug_words:
-                score += 3
-            elif len(word) >= 4 and word in slug:
-                score += 1
-
-        # الاسم الكامل/الكلمة الرئيسية في الرابط أهم من مجرد أول نتيجة.
-        if wanted and wanted[0] in slug_words:
-            score += 4
-
-        unique.append((score, path))
-
-    unique.sort(key=lambda item: item[0], reverse=True)
-
-    return [path for _, path in unique[:10]]
-
-
-def _extract_argentina_usd_from_xbox_now(html):
-
-    clean_text = _normalize_xbox_now_text(html)
-
-    # الشكل الظاهر في Xbox-Now يكون تقريباً:
-    # AR Argentina ... 0.24 USD ... 359.00 ARS
-    # نبدأ من Argentina حتى لا نأخذ USD الخاص بالولايات المتحدة.
-    patterns = [
-        r"(?:Image:\s*)?AR\s+Argentina.*?(\d+(?:[.,]\d+)?)\s*USD.*?([\d.,]+)\s*ARS",
-        r"Argentina.*?(\d+(?:[.,]\d+)?)\s*USD.*?([\d.,]+)\s*ARS",
-    ]
-
-    for pattern in patterns:
-
-        matches = re.findall(
-            pattern,
-            clean_text,
-            flags=re.IGNORECASE | re.DOTALL
-        )
-
-        for usd_text, ars_text in matches:
-
-            usd_text = usd_text.replace(",", "")
-            ars_text = ars_text.replace(",", "")
-
-            try:
-                usd_price = float(usd_text)
-                ars_price = float(ars_text)
-            except Exception:
-                continue
-
-            if usd_price > 0 and ars_price > 0:
-                return usd_price
-
-    raise Exception(
-        "Xbox-Now: ماكدرت أطلع سعر Argentina بالدولار"
-    )
-
-
-def get_argentina_usd_from_xbox_now(game_name):
-
+def get_product_data_market(product_id, market, languages):
     """
-    يجلب سعر Argentina الظاهر بالدولار من Xbox-Now.
-
-    Xbox-Now يدعم البحث عبر:
-        /en/game-comparison?search=<game>&page=1
-
-    بعدها نفتح صفحة اللعبة الصحيحة ونقرأ سعر AR Argentina.
+    يجلب بيانات اللعبة من Microsoft Display Catalog حسب الريجن.
+    هذا هو المصدر الرسمي لمتجر Xbox.
     """
 
-    search_url = "https://www.xbox-now.com/en/game-comparison"
+    url = (
+        "https://displaycatalog.mp.microsoft.com/"
+        "v7.0/products"
+    )
+
+    params = {
+        "bigIds": product_id,
+        "market": market,
+        "languages": languages,
+        "fieldsTemplate": "Details",
+        "actionFilter": "Browse"
+    }
 
     response = SESSION.get(
-        search_url,
-        params={
-            "search": game_name,
-            "page": "1"
-        },
+        url,
+        params=params,
         timeout=30
     )
+
     response.raise_for_status()
 
-    game_links = _extract_xbox_now_game_links(
-        response.text,
-        game_name
-    )
+    data = response.json()
 
-    if not game_links:
-        raise Exception(
-            "Xbox-Now: ما لكيت رابط اللعبة"
-        )
+    products = data.get("Products", [])
 
-    last_error = None
+    if products:
+        return products[0]
 
-    for detail_path in game_links:
+    product = data.get("Product")
 
-        detail_url = (
-            "https://www.xbox-now.com"
-            + detail_path
-        )
-
-        try:
-
-            detail_response = SESSION.get(
-                detail_url,
-                timeout=30
-            )
-            detail_response.raise_for_status()
-
-            usd_price = _extract_argentina_usd_from_xbox_now(
-                detail_response.text
-            )
-
-            return usd_price, detail_url
-
-        except Exception as error:
-
-            last_error = error
-            print(
-                "XBOX-NOW DETAIL FAILED:",
-                detail_url,
-                repr(error)
-            )
+    if product:
+        return product
 
     raise Exception(
-        f"Xbox-Now: فشل جلب سعر Argentina: {last_error}"
+        f"Microsoft لم يعثر على اللعبة في متجر {market}"
     )
 
 
-def calculate_argentina_sale_price(usd_price):
+def get_argentina_ars_from_xbox_store(product_id):
+    """
+    يجلب السعر الحالي من Xbox Store Argentina الرسمي
+    مباشرة عبر Microsoft Display Catalog.
+    """
 
-    supplier_cost = float(usd_price) * ARGENTINA_USD_TO_IQD
+    product = get_product_data_market(
+        product_id,
+        "AR",
+        "es-AR,en-US"
+    )
 
-    sale_before_rounding = supplier_cost + ARGENTINA_PROFIT_IQD
+    prices = get_prices_for_currency(
+        product,
+        ("ARS",)
+    )
+
+    current_price, _, _ = best_price(
+        prices
+    )
+
+    if current_price is None:
+        raise Exception(
+            "Microsoft لم يعثر على سعر Argentina بالـ ARS"
+        )
+
+    return float(current_price)
+
+
+def get_prices_for_currency(product, allowed_currencies):
+    """
+    استخراج الأسعار حسب العملة المطلوبة من بيانات Microsoft.
+    """
+    allowed = {
+        str(currency).upper()
+        for currency in allowed_currencies
+    }
+
+    results = []
+
+    sku_availabilities = product.get(
+        "DisplaySkuAvailabilities",
+        []
+    )
+
+    for sku_data in sku_availabilities:
+
+        for availability in sku_data.get(
+            "Availabilities",
+            []
+        ):
+
+            price_data = availability.get(
+                "OrderManagementData",
+                {}
+            ).get(
+                "Price",
+                {}
+            )
+
+            if not price_data:
+                continue
+
+            currency = str(
+                price_data.get(
+                    "CurrencyCode",
+                    ""
+                )
+            ).upper()
+
+            if currency not in allowed:
+                continue
+
+            current = to_float(
+                price_data.get("ListPrice")
+            )
+
+            original = to_float(
+                price_data.get("MSRP")
+            )
+
+            if current is None or current <= 0:
+                continue
+
+            end_date = availability.get(
+                "Conditions",
+                {}
+            ).get(
+                "EndDate"
+            )
+
+            if (
+                original is not None
+                and original > current
+            ):
+                results.append(
+                    (
+                        current,
+                        original,
+                        end_date
+                    )
+                )
+            else:
+                results.append(
+                    (
+                        current,
+                        None,
+                        end_date
+                    )
+                )
+
+    return results
+
+
+def calculate_argentina_sale_price(ars_price):
+    """
+    حساب سعر الزبون من سعر Xbox Store Argentina بالـ ARS.
+
+    1000 ARS = 6.38 USD
+    1 USD = 1660 IQD
+    + 3000 IQD ربح
+    ثم تقريب السعر لأقرب 1000 دينار.
+    """
+
+    usd_price = (
+        float(ars_price)
+        / 1000.0
+        * ARGENTINA_ARS_PER_1000_USD
+    )
+
+    supplier_cost = (
+        usd_price
+        * ARGENTINA_USD_TO_IQD
+    )
+
+    sale_before_rounding = (
+        supplier_cost
+        + ARGENTINA_PROFIT_IQD
+    )
 
     sale_price = round_customer_price(
         sale_before_rounding
     )
 
     return (
+        float(usd_price),
         int(round(supplier_cost)),
         int(sale_price)
     )
@@ -1090,6 +1089,9 @@ def calculate_argentina_sale_price(usd_price):
 
 # =========================================================
 # حفظ آخر بحث
+# =========================================================
+
+
 # =========================================================
 
 def save_last_request(
@@ -1583,29 +1585,30 @@ async def create_game_result(
         turkey_price
     )
 
-    # 🇦🇷 نحاول جلب سعر الأرجنتين تلقائياً.
+    # 🇦🇷 نحاول جلب سعر الأرجنتين مباشرة من Xbox Store الرسمي.
     # إذا فشل المصدر، نستخدم تركيا بشكل طبيعي.
     argentina_sale_price = None
-    argentina_usd_price = None
+    argentina_ars_price = None
 
     try:
 
-        (
-            argentina_usd_price,
-            _argentina_url
-        ) = await asyncio.to_thread(
-            get_argentina_usd_from_xbox_now,
-            game_name
+        argentina_ars_price = await asyncio.to_thread(
+            get_argentina_ars_from_xbox_store,
+            product_id
         )
 
-        _argentina_supplier_cost, argentina_sale_price = calculate_argentina_sale_price(
-            argentina_usd_price
+        (
+            _argentina_usd_price,
+            _argentina_supplier_cost,
+            argentina_sale_price
+        ) = calculate_argentina_sale_price(
+            argentina_ars_price
         )
 
     except Exception as error:
 
         print(
-            "ARGENTINA AUTO PRICE ERROR:",
+            "ARGENTINA XBOX STORE PRICE ERROR:",
             product_id,
             game_name,
             repr(error)
