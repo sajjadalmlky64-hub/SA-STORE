@@ -2,9 +2,9 @@ import os
 import re
 import math
 import asyncio
+import difflib
 import sqlite3
 import requests
-from urllib.parse import quote_plus
 
 from datetime import datetime, timezone
 from collections import Counter
@@ -34,13 +34,6 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 ORDER_URL = "https://t.me/Sijadsa"
 DB_FILE = "price_alerts.db"
-
-# 🇦🇷 إعدادات سعر الأرجنتين
-# 1000 ARS = 6.38 USD
-# 1 USD = 1660 IQD
-ARGENTINA_ARS_PER_1000_USD = 6.38
-ARGENTINA_USD_TO_IQD = 1660
-ARGENTINA_PROFIT_IQD = 3000
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN غير موجود في Variables")
@@ -114,6 +107,18 @@ def init_database():
             current_price INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, product_id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            customer_name TEXT NOT NULL,
+            game_name TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            price INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -580,7 +585,6 @@ def best_price(items):
     return price, None, None
 
 
-
 # =========================================================
 # معلومات اللعبة من Product ID
 # =========================================================
@@ -775,6 +779,249 @@ def search_xbox_games(
     return unique
 
 
+
+# =========================================================
+# تطبيع أسماء الإصدارات + البحث الذكي
+# =========================================================
+
+EDITION_REPLACEMENTS = [
+    ("game of the year sürümü", "Game of the Year Edition"),
+    ("game of the year edition", "Game of the Year Edition"),
+    ("yılın oyunu sürümü", "Game of the Year Edition"),
+    ("nihai sürüm", "Ultimate Edition"),
+    ("ultimate sürüm", "Ultimate Edition"),
+    ("altın sürüm", "Gold Edition"),
+    ("gold sürüm", "Gold Edition"),
+    ("lüks sürüm", "Deluxe Edition"),
+    ("deluxe sürüm", "Deluxe Edition"),
+    ("standart sürüm", "Standard Edition"),
+    ("standard sürüm", "Standard Edition"),
+    ("tam sürüm", "Complete Edition"),
+    ("komple sürüm", "Complete Edition"),
+    ("premium sürüm", "Premium Edition"),
+    ("özel sürüm", "Special Edition"),
+    ("legendary sürüm", "Legendary Edition"),
+    ("definitive sürüm", "Definitive Edition"),
+    ("director's cut sürüm", "Director's Cut Edition"),
+    ("director’s cut sürüm", "Director's Cut Edition"),
+]
+
+
+def normalize_edition_name(title):
+    if not title:
+        return title
+
+    result = str(title)
+
+    for old, new in EDITION_REPLACEMENTS:
+        result = re.sub(
+            re.escape(old),
+            new,
+            result,
+            flags=re.IGNORECASE
+        )
+
+    result = re.sub(
+        r"\bSürüm\b",
+        "Edition",
+        result,
+        flags=re.IGNORECASE
+    )
+
+    return result
+
+
+def normalize_search_text(text):
+    text = str(text or "").lower().strip()
+    text = text.replace("’", "'").replace("–", "-").replace("—", "-")
+    text = re.sub(r"[^a-z0-9\u0600-\u06ff]+", " ", text)
+    text = re.sub(
+        r"\b(edition|sürüm|version)\b",
+        " ",
+        text
+    )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def search_similarity(query, title):
+    query_norm = normalize_search_text(query)
+    title_norm = normalize_search_text(title)
+
+    if not query_norm or not title_norm:
+        return 0.0
+
+    return difflib.SequenceMatcher(
+        None,
+        query_norm,
+        title_norm
+    ).ratio()
+
+
+def find_search_suggestion(query, results):
+    """
+    يرجع نتيجة واحدة فقط إذا كان واضح أن المستخدم أخطأ
+    بخطأ إملائي بسيط، وإلا يرجع None.
+    """
+    query_norm = normalize_search_text(query)
+
+    if not query_norm or not results:
+        return None
+
+    best = None
+
+    for product_id, title in results:
+        title_norm = normalize_search_text(title)
+
+        if not title_norm:
+            continue
+
+        if query_norm == title_norm:
+            continue
+
+        score = search_similarity(query, title)
+        length_difference = abs(
+            len(query_norm) - len(title_norm)
+        )
+
+        if score < 0.88 or length_difference > 3:
+            continue
+
+        candidate = (
+            score,
+            product_id,
+            title
+        )
+
+        if best is None or score > best[0]:
+            best = candidate
+
+    if best:
+        return best[1], best[2], best[0]
+
+    return None
+
+
+def generate_typo_variants(query, max_variants=12):
+    """
+    يولد محاولات بسيطة للأخطاء الإملائية:
+    - إضافة حرف صوتي مفقود
+    - حذف حرف زائد
+    - تبديل حرفين متجاورين
+    """
+    query = str(query or "").strip()
+
+    if not query:
+        return []
+
+    variants = []
+    seen = {query.lower()}
+
+    def add(value):
+        value = value.strip()
+
+        if (
+            len(value) < 2
+            or value.lower() in seen
+            or len(variants) >= max_variants
+        ):
+            return
+
+        seen.add(value.lower())
+        variants.append(value)
+
+    words = query.split()
+
+    # أولاً: إضافة حرف صوتي. هذا يعالج أخطاء مثل Raidr -> Raider.
+    vowels = "eaiou"
+
+    for vowel in vowels:
+        for word_index, word in enumerate(words):
+            if len(word) < 3:
+                continue
+
+            for char_index in range(len(word) + 1):
+                new_word = (
+                    word[:char_index]
+                    + vowel
+                    + word[char_index:]
+                )
+
+                new_words = list(words)
+                new_words[word_index] = new_word
+                add(" ".join(new_words))
+
+                if len(variants) >= max_variants:
+                    return variants
+
+    # ثانياً: حذف حرف زائد.
+    for word_index, word in enumerate(words):
+        if len(word) < 4:
+            continue
+
+        for char_index in range(len(word)):
+            new_word = (
+                word[:char_index]
+                + word[char_index + 1:]
+            )
+
+            new_words = list(words)
+            new_words[word_index] = new_word
+            add(" ".join(new_words))
+
+            if len(variants) >= max_variants:
+                return variants
+
+    # ثالثاً: تبديل حرفين متجاورين.
+    for word_index, word in enumerate(words):
+        if len(word) < 4:
+            continue
+
+        for char_index in range(len(word) - 1):
+            chars = list(word)
+            chars[char_index], chars[char_index + 1] = (
+                chars[char_index + 1],
+                chars[char_index]
+            )
+
+            new_words = list(words)
+            new_words[word_index] = "".join(chars)
+            add(" ".join(new_words))
+
+            if len(variants) >= max_variants:
+                return variants
+
+    return variants
+
+
+def search_xbox_games_enhanced(query, top=5):
+    """
+    البحث العادي أولاً.
+    إذا لم نجد نتائج، نجرب تصحيحات إملائية بسيطة.
+    """
+    results = search_xbox_games(query, top)
+
+    if results:
+        return results
+
+    for variant in generate_typo_variants(query):
+        try:
+            variant_results = search_xbox_games(
+                variant,
+                top
+            )
+
+            if variant_results:
+                return variant_results
+
+        except Exception as error:
+            print(
+                "TYPO SEARCH FAILED:",
+                variant,
+                repr(error)
+            )
+
+    return []
+
 # =========================================================
 # حل نتيجة البحث بشكل موثوق
 # =========================================================
@@ -881,217 +1128,7 @@ def format_store_price(price):
 
 
 # =========================================================
-# 🇦🇷 سعر الأرجنتين من Xbox-Now
-# =========================================================
-
-def round_customer_price(price):
-
-    """تقريب سعر الزبون لأقرب 1000 دينار بدون كسور."""
-
-    price = int(round(float(price)))
-    return max(1000, int((price + 500) // 1000) * 1000)
-
-
-def get_product_data_market(product_id, market, languages):
-    """
-    يجلب بيانات اللعبة من Microsoft Display Catalog حسب الريجن.
-    هذا هو المصدر الرسمي لمتجر Xbox.
-    """
-
-    url = (
-        "https://displaycatalog.mp.microsoft.com/"
-        "v7.0/products"
-    )
-
-    params = {
-        "bigIds": product_id,
-        "market": market,
-        "languages": languages,
-        "fieldsTemplate": "Details",
-        "actionFilter": "Browse"
-    }
-
-    response = SESSION.get(
-        url,
-        params=params,
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    products = data.get("Products", [])
-
-    if products:
-        return products[0]
-
-    product = data.get("Product")
-
-    if product:
-        return product
-
-    raise Exception(
-        f"Microsoft لم يعثر على اللعبة في متجر {market}"
-    )
-
-
-def get_argentina_ars_from_xbox_store(product_id):
-    """
-    يجلب السعر الحالي من Xbox Store Argentina الرسمي
-    مباشرة عبر Microsoft Display Catalog.
-    """
-
-    product = get_product_data_market(
-        product_id,
-        "AR",
-        "es-AR,en-US"
-    )
-
-    prices = get_prices_for_currency(
-        product,
-        ("ARS",)
-    )
-
-    current_price, _, _ = best_price(
-        prices
-    )
-
-    if current_price is None:
-        raise Exception(
-            "Microsoft لم يعثر على سعر Argentina بالـ ARS"
-        )
-
-    return float(current_price)
-
-
-def get_prices_for_currency(product, allowed_currencies):
-    """
-    استخراج الأسعار حسب العملة المطلوبة من بيانات Microsoft.
-    """
-    allowed = {
-        str(currency).upper()
-        for currency in allowed_currencies
-    }
-
-    results = []
-
-    sku_availabilities = product.get(
-        "DisplaySkuAvailabilities",
-        []
-    )
-
-    for sku_data in sku_availabilities:
-
-        for availability in sku_data.get(
-            "Availabilities",
-            []
-        ):
-
-            price_data = availability.get(
-                "OrderManagementData",
-                {}
-            ).get(
-                "Price",
-                {}
-            )
-
-            if not price_data:
-                continue
-
-            currency = str(
-                price_data.get(
-                    "CurrencyCode",
-                    ""
-                )
-            ).upper()
-
-            if currency not in allowed:
-                continue
-
-            current = to_float(
-                price_data.get("ListPrice")
-            )
-
-            original = to_float(
-                price_data.get("MSRP")
-            )
-
-            if current is None or current <= 0:
-                continue
-
-            end_date = availability.get(
-                "Conditions",
-                {}
-            ).get(
-                "EndDate"
-            )
-
-            if (
-                original is not None
-                and original > current
-            ):
-                results.append(
-                    (
-                        current,
-                        original,
-                        end_date
-                    )
-                )
-            else:
-                results.append(
-                    (
-                        current,
-                        None,
-                        end_date
-                    )
-                )
-
-    return results
-
-
-def calculate_argentina_sale_price(ars_price):
-    """
-    حساب سعر الزبون من سعر Xbox Store Argentina بالـ ARS.
-
-    1000 ARS = 6.38 USD
-    1 USD = 1660 IQD
-    + 3000 IQD ربح
-    ثم تقريب السعر لأقرب 1000 دينار.
-    """
-
-    usd_price = (
-        float(ars_price)
-        / 1000.0
-        * ARGENTINA_ARS_PER_1000_USD
-    )
-
-    supplier_cost = (
-        usd_price
-        * ARGENTINA_USD_TO_IQD
-    )
-
-    sale_before_rounding = (
-        supplier_cost
-        + ARGENTINA_PROFIT_IQD
-    )
-
-    sale_price = round_customer_price(
-        sale_before_rounding
-    )
-
-    return (
-        float(usd_price),
-        int(round(supplier_cost)),
-        int(sale_price)
-    )
-
-
-# =========================================================
 # حفظ آخر بحث
-# =========================================================
-
-
 # =========================================================
 
 def save_last_request(
@@ -1495,8 +1532,7 @@ def get_game_keyboard(
     active,
     show_back=False,
     has_discount=False,
-    is_favorite=False,
-    allow_alert=True
+    is_favorite=False
 ):
 
     buttons = [
@@ -1524,10 +1560,8 @@ def get_game_keyboard(
         ]
     ]
 
-    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة
-    # وكان السعر المختار من تركيا، لأن تنبيه السعر الحالي
-    # يعتمد على مصدر تركيا الموجود في نظام التنبيهات.
-    if allow_alert and not has_discount:
+    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة.
+    if not has_discount:
 
         if active:
 
@@ -1569,7 +1603,7 @@ def get_game_keyboard(
 # إنشاء نتيجة اللعبة
 # =========================================================
 
-async def create_game_result(
+def create_game_result(
     update,
     product_id,
     game_name,
@@ -1580,55 +1614,13 @@ async def create_game_result(
     show_back=False
 ):
 
-    # 🇹🇷 السعر النهائي من تركيا
-    turkey_sale_price = calculate_price(
+    store_price = calculate_price(
         turkey_price
     )
 
-    # 🇦🇷 نحاول جلب سعر الأرجنتين مباشرة من Xbox Store الرسمي.
-    # إذا فشل المصدر، نستخدم تركيا بشكل طبيعي.
-    argentina_sale_price = None
-    argentina_ars_price = None
-
-    try:
-
-        argentina_ars_price = await asyncio.to_thread(
-            get_argentina_ars_from_xbox_store,
-            product_id
-        )
-
-        (
-            _argentina_usd_price,
-            _argentina_supplier_cost,
-            argentina_sale_price
-        ) = calculate_argentina_sale_price(
-            argentina_ars_price
-        )
-
-    except Exception as error:
-
-        print(
-            "ARGENTINA XBOX STORE PRICE ERROR:",
-            product_id,
-            game_name,
-            repr(error)
-        )
-
-    # نختار الأرخص للزبون بدون إظهار اسم الريجن.
-    if (
-        argentina_sale_price is not None
-        and argentina_sale_price < turkey_sale_price
-    ):
-
-        final_price = argentina_sale_price
-        selected_region = "argentina"
-
-    else:
-
-        final_price = turkey_sale_price
-        selected_region = "turkey"
-
     # create_game_result() يُستخدم من الرسائل العادية ومن ضغط الأزرار.
+    # في الرسالة العادية يكون لدينا Update.effective_user،
+    # أما CallbackQuery فالمستخدم موجود في from_user.
     user = getattr(update, "effective_user", None)
 
     if user is None:
@@ -1642,28 +1634,25 @@ async def create_game_result(
         product_id,
         game_name,
         reference,
-        final_price
+        store_price
     )
 
-    # معلومات التخفيض تظهر فقط عندما كان السعر التركي هو السعر المختار.
     discount_percent = None
 
-    if selected_region == "turkey":
+    if (
+        original_price is not None
+        and original_price > turkey_price
+    ):
 
-        if (
-            original_price is not None
-            and original_price > turkey_price
-        ):
-
-            discount_percent = round(
+        discount_percent = round(
+            (
                 (
-                    (
-                        original_price
-                        - turkey_price
-                    )
-                    / original_price
-                ) * 100
-            )
+                    original_price
+                    - turkey_price
+                )
+                / original_price
+            ) * 100
+        )
 
     expiry_text = ""
 
@@ -1688,13 +1677,17 @@ async def create_game_result(
             )
 
     price_text = format_store_price(
-        final_price
+        store_price
+    )
+
+    display_game_name = normalize_edition_name(
+        game_name
     )
 
     if discount_percent is not None:
 
         message = (
-            f"🎮 <b>{game_name}</b>\n\n"
+            f"🎮 <b>{display_game_name}</b>\n\n"
             "🔥 <b>اللعبة عليها تخفيض!</b>\n\n"
             f"📉 نسبة الخصم: "
             f"<b>{discount_percent}%</b>\n"
@@ -1706,7 +1699,7 @@ async def create_game_result(
     else:
 
         message = (
-            f"🎮 <b>{game_name}</b>\n\n"
+            f"🎮 <b>{display_game_name}</b>\n\n"
             f"💰 سعر اللعبة: "
             f"<b>{price_text}</b> 🇮🇶"
         )
@@ -1722,8 +1715,7 @@ async def create_game_result(
         favorite_exists(
             user.id,
             product_id
-        ),
-        allow_alert=(selected_region == "turkey")
+        )
     )
 
     return message, keyboard
@@ -1740,9 +1732,22 @@ async def start(
 
     if update.message:
 
+        keyboard = None
+
+        if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🧾 سجل الطلبات",
+                        callback_data="adminorders"
+                    )
+                ]
+            ])
+
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
-            "أو اكتب اسم اللعبة 🔍"
+            "أو اكتب اسم اللعبة 🔍",
+            reply_markup=keyboard
         )
 
 
@@ -1761,6 +1766,64 @@ async def my_id(
             f"🆔 Telegram ID مالك:\n\n"
             f"{update.effective_user.id}"
         )
+
+
+# =========================================================
+# سجل الطلبات - أمر الأدمن
+# =========================================================
+
+async def admin_orders_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
+        return
+
+    if not ADMIN_CHAT_ID or str(update.effective_user.id) != str(ADMIN_CHAT_ID):
+        await update.message.reply_text(
+            "❌ هذا الأمر للأدمن فقط."
+        )
+        return
+
+    orders = get_orders(50)
+
+    if not orders:
+        await update.message.reply_text(
+            "🧾 سجل الطلبات\n\nماكو طلبات مسجلة حالياً."
+        )
+        return
+
+    lines = ["🧾 <b>سجل الطلبات</b>", ""]
+
+    for order_id, customer_name, game_name, price, created_at in orders:
+        price_text = (
+            format_store_price(price)
+            if price is not None
+            else "غير معروف"
+        )
+        lines.append(
+            f"<b>#{order_id}</b> 🎮 {game_name[:45]}\n"
+            f"👤 {customer_name}\n"
+            f"💰 {price_text} 🇮🇶\n"
+            f"🕐 {created_at}"
+        )
+        lines.append("────────────")
+
+    lines.append("\n📌 آخر 50 طلب فقط")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔄 تحديث",
+                    callback_data="adminorders"
+                )
+            ]
+        ])
+    )
 
 
 # =========================================================
@@ -1803,7 +1866,7 @@ async def handle_message(
                 text
             )
 
-            message, keyboard = await create_game_result(
+            message, keyboard = create_game_result(
                 update,
                 product_id,
                 game_name,
@@ -1826,7 +1889,7 @@ async def handle_message(
         # =================================================
 
         results = await asyncio.to_thread(
-            search_xbox_games,
+            search_xbox_games_enhanced,
             text,
             5
         )
@@ -1889,6 +1952,44 @@ async def handle_message(
             return
 
         # =================================================
+        # اقتراح تصحيح إملائي واضح
+        # =================================================
+
+        suggestion = find_search_suggestion(
+            text,
+            valid_results
+        )
+
+        if suggestion:
+            (
+                suggestion_product_id,
+                suggestion_name,
+                suggestion_score
+            ) = suggestion
+
+            suggestion_display_name = normalize_edition_name(
+                suggestion_name
+            )
+
+            await processing.edit_text(
+                "🔎 <b>هل تقصد:</b>\n\n"
+                f"🎮 <b>{suggestion_display_name[:70]}</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            f"🎮 {suggestion_display_name[:55]}",
+                            callback_data=(
+                                f"suggestsearch:{suggestion_product_id}"
+                            )
+                        )
+                    ]
+                ])
+            )
+
+            return
+
+        # =================================================
         # نتيجة واحدة
         # =================================================
 
@@ -1916,7 +2017,7 @@ async def handle_message(
                 end_date
             ) = info
 
-            message, keyboard = await create_game_result(
+            message, keyboard = create_game_result(
                 update,
                 resolved_product_id,
                 game_name,
@@ -1948,10 +2049,14 @@ async def handle_message(
 
         for product_id, result_name in valid_results:
 
+            display_name = normalize_edition_name(
+                result_name
+            )
+
             buttons.append(
                 [
                     InlineKeyboardButton(
-                        f"🎮 {result_name[:50]}",
+                        f"🎮 {display_name[:50]}",
                         callback_data=(
                             f"searchselect:{product_id}"
                         )
@@ -2077,6 +2182,60 @@ async def check_price_alerts(
 
 
 # =========================================================
+# سجل الطلبات
+# =========================================================
+
+def save_order(
+    user_id,
+    customer_name,
+    game_name,
+    product_id,
+    price
+):
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO orders
+        (user_id, customer_name, game_name, product_id, price)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            customer_name,
+            game_name,
+            product_id,
+            price
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def get_orders(limit=50):
+
+    connection = sqlite3.connect(DB_FILE)
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, customer_name, game_name, price, created_at
+        FROM orders
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,)
+    )
+
+    rows = cursor.fetchall()
+    connection.close()
+    return rows
+
+
+# =========================================================
 # حلقة التنبيهات
 # =========================================================
 
@@ -2128,12 +2287,110 @@ async def button_handler(
     user_id = user.id
 
     # =====================================================
+    # سجل الطلبات - للأدمن فقط
+    # =====================================================
+
+    if data == "adminorders":
+
+        if not ADMIN_CHAT_ID or str(user_id) != str(ADMIN_CHAT_ID):
+            await query.answer(
+                "❌ هذا القسم للأدمن فقط",
+                show_alert=True
+            )
+            return
+
+        orders = get_orders(50)
+
+        if not orders:
+            await query.answer()
+            await query.edit_message_text(
+                "🧾 <b>سجل الطلبات</b>\n\n"
+                "ماكو طلبات مسجلة حالياً.",
+                parse_mode="HTML"
+            )
+            return
+
+        lines = ["🧾 <b>سجل الطلبات</b>", ""]
+
+        for order_id, customer_name, game_name, price, created_at in orders:
+            price_text = (
+                format_store_price(price)
+                if price is not None
+                else "غير معروف"
+            )
+            lines.append(
+                f"<b>#{order_id}</b> 🎮 {game_name[:45]}\n"
+                f"👤 {customer_name}\n"
+                f"💰 {price_text} 🇮🇶\n"
+                f"🕐 {created_at}"
+            )
+            lines.append("────────────")
+
+        lines.append("\n📌 آخر 50 طلب فقط")
+
+        await query.answer()
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔄 تحديث",
+                        callback_data="adminorders"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 الرئيسية",
+                        callback_data="adminhome"
+                    )
+                ]
+            ])
+        )
+        return
+
+    # =====================================================
+    # الرئيسية - للأدمن
+    # =====================================================
+
+    if data == "adminhome":
+
+        if not ADMIN_CHAT_ID or str(user_id) != str(ADMIN_CHAT_ID):
+            await query.answer(
+                "❌ هذا القسم للأدمن فقط",
+                show_alert=True
+            )
+            return
+
+        await query.answer()
+        await query.edit_message_text(
+            "🎮 <b>SA STORE</b>\n\n"
+            "أرسل رابط لعبة من Xbox Store\n"
+            "أو اكتب اسم اللعبة 🔍",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🧾 سجل الطلبات",
+                        callback_data="adminorders"
+                    )
+                ]
+            ])
+        )
+        return
+
+    # =====================================================
     # اختيار نتيجة البحث
     # =====================================================
 
-    if data.startswith(
-        "searchselect:"
+    if (
+        data.startswith("searchselect:")
+        or data.startswith("suggestsearch:")
     ):
+
+        is_suggestion = data.startswith(
+            "suggestsearch:"
+        )
 
         product_id = data.split(
             ":",
@@ -2142,6 +2399,8 @@ async def button_handler(
 
         await query.answer(
             "⏳ جاري جلب السعر..."
+            if not is_suggestion
+            else "⏳ جاري جلب اللعبة المقترحة..."
         )
 
         try:
@@ -2169,7 +2428,7 @@ async def button_handler(
                 end_date
             ) = info
 
-            message, keyboard = await create_game_result(
+            message, keyboard = create_game_result(
                 query,
                 resolved_product_id,
                 game_name,
@@ -2177,7 +2436,11 @@ async def button_handler(
                 original_price,
                 end_date,
                 f"xboxid:{resolved_product_id}",
-                show_back=True
+                show_back=(
+                    True
+                    if not is_suggestion
+                    else user_id in SEARCH_SELECTIONS
+                )
             )
 
             await query.edit_message_text(
@@ -2224,10 +2487,14 @@ async def button_handler(
 
         for result_product_id, result_name in results:
 
+            display_name = normalize_edition_name(
+                result_name
+            )
+
             buttons.append(
                 [
                     InlineKeyboardButton(
-                        f"🎮 {result_name[:50]}",
+                        f"🎮 {display_name[:50]}",
                         callback_data=(
                             f"searchselect:{result_product_id}"
                         )
@@ -2444,7 +2711,7 @@ async def button_handler(
                 end_date
             ) = info
 
-            message, keyboard = await create_game_result(
+            message, keyboard = create_game_result(
                 query,
                 resolved_product_id,
                 game_name,
@@ -2635,6 +2902,14 @@ async def button_handler(
                 or "بدون اسم"
             )
 
+        save_order(
+            user_id,
+            customer_name,
+            game_name,
+            product_id,
+            current_price
+        )
+
         price_text = ""
 
         if current_price is not None:
@@ -2747,6 +3022,13 @@ def main():
         CommandHandler(
             "id",
             my_id
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "orders",
+            admin_orders_command
         )
     )
 
