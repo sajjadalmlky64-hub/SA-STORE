@@ -889,89 +889,187 @@ def round_customer_price(price):
     return max(1000, int((price + 500) // 1000) * 1000)
 
 
+def _normalize_xbox_now_text(html):
+
+    # نفك HTML entities ونحذف السكربتات/الستايلات حتى يصير
+    # البحث عن قسم Argentina أكثر ثباتاً.
+    from html import unescape
+
+    html = unescape(html or "")
+
+    html = re.sub(
+        r"<script.*?</script>|<style.*?</style>",
+        " ",
+        html,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
+    # نحافظ على فواصل بسيطة بين عناصر HTML.
+    html = re.sub(r"<[^>]+>", " ", html)
+    html = re.sub(r"\s+", " ", html)
+
+    return html.strip()
+
+
+def _extract_xbox_now_game_links(html, game_name):
+
+    # Xbox-Now يستخدم روابط نسبية، وأحياناً قد تظهر كرابط مطلق.
+    links = re.findall(
+        r'href=["\'](?:https://www\.xbox-now\.com)?(/en/game/\d+/[^"\'?#]+)',
+        html or "",
+        flags=re.IGNORECASE
+    )
+
+    if not links:
+        return []
+
+    # تطبيع اسم اللعبة إلى كلمات بسيطة للمطابقة.
+    wanted = re.findall(
+        r"[a-z0-9]+",
+        game_name.lower()
+    )
+
+    unique = []
+    seen = set()
+
+    for path in links:
+
+        path = path.rstrip("/")
+
+        if path in seen:
+            continue
+
+        seen.add(path)
+
+        slug = path.rsplit("/", 1)[-1].lower()
+        slug_words = re.findall(r"[a-z0-9]+", slug)
+
+        score = 0
+
+        for word in wanted:
+            if word in slug_words:
+                score += 3
+            elif len(word) >= 4 and word in slug:
+                score += 1
+
+        # الاسم الكامل/الكلمة الرئيسية في الرابط أهم من مجرد أول نتيجة.
+        if wanted and wanted[0] in slug_words:
+            score += 4
+
+        unique.append((score, path))
+
+    unique.sort(key=lambda item: item[0], reverse=True)
+
+    return [path for _, path in unique[:10]]
+
+
+def _extract_argentina_usd_from_xbox_now(html):
+
+    clean_text = _normalize_xbox_now_text(html)
+
+    # الشكل الظاهر في Xbox-Now يكون تقريباً:
+    # AR Argentina ... 0.24 USD ... 359.00 ARS
+    # نبدأ من Argentina حتى لا نأخذ USD الخاص بالولايات المتحدة.
+    patterns = [
+        r"(?:Image:\s*)?AR\s+Argentina.*?(\d+(?:[.,]\d+)?)\s*USD.*?([\d.,]+)\s*ARS",
+        r"Argentina.*?(\d+(?:[.,]\d+)?)\s*USD.*?([\d.,]+)\s*ARS",
+    ]
+
+    for pattern in patterns:
+
+        matches = re.findall(
+            pattern,
+            clean_text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+
+        for usd_text, ars_text in matches:
+
+            usd_text = usd_text.replace(",", "")
+            ars_text = ars_text.replace(",", "")
+
+            try:
+                usd_price = float(usd_text)
+                ars_price = float(ars_text)
+            except Exception:
+                continue
+
+            if usd_price > 0 and ars_price > 0:
+                return usd_price
+
+    raise Exception(
+        "Xbox-Now: ماكدرت أطلع سعر Argentina بالدولار"
+    )
+
+
 def get_argentina_usd_from_xbox_now(game_name):
 
     """
-    يبحث عن اللعبة في Xbox-Now ثم يقرأ سعر Argentina بالدولار.
-    نستخدم سعر USD الظاهر بالموقع لأن التاجر يحاسبنا على أساس 1600 د.ع للدولار.
+    يجلب سعر Argentina الظاهر بالدولار من Xbox-Now.
+
+    Xbox-Now يدعم البحث عبر:
+        /en/game-comparison?search=<game>&page=1
+
+    بعدها نفتح صفحة اللعبة الصحيحة ونقرأ سعر AR Argentina.
     """
 
     search_url = "https://www.xbox-now.com/en/game-comparison"
 
-    search_params = {
-        "search": game_name,
-        "page": "1"
-    }
-
     response = SESSION.get(
         search_url,
-        params=search_params,
+        params={
+            "search": game_name,
+            "page": "1"
+        },
         timeout=30
     )
     response.raise_for_status()
 
-    html = response.text
-
-    # نأخذ أول صفحة لعبة ظهرت نتيجةً للبحث.
-    game_links = re.findall(
-        r'href=["\'](/en/game/\d+/[^"\']+)',
-        html,
-        flags=re.IGNORECASE
+    game_links = _extract_xbox_now_game_links(
+        response.text,
+        game_name
     )
 
     if not game_links:
-        raise Exception("Xbox-Now لم يعثر على صفحة اللعبة")
+        raise Exception(
+            "Xbox-Now: ما لكيت رابط اللعبة"
+        )
 
-    detail_path = game_links[0]
+    last_error = None
 
-    detail_url = "https://www.xbox-now.com" + detail_path
+    for detail_path in game_links:
 
-    detail_response = SESSION.get(
-        detail_url,
-        timeout=30
+        detail_url = (
+            "https://www.xbox-now.com"
+            + detail_path
+        )
+
+        try:
+
+            detail_response = SESSION.get(
+                detail_url,
+                timeout=30
+            )
+            detail_response.raise_for_status()
+
+            usd_price = _extract_argentina_usd_from_xbox_now(
+                detail_response.text
+            )
+
+            return usd_price, detail_url
+
+        except Exception as error:
+
+            last_error = error
+            print(
+                "XBOX-NOW DETAIL FAILED:",
+                detail_url,
+                repr(error)
+            )
+
+    raise Exception(
+        f"Xbox-Now: فشل جلب سعر Argentina: {last_error}"
     )
-    detail_response.raise_for_status()
-
-    detail_html = detail_response.text
-
-    # نحول HTML إلى نص حتى نقرأ: AR Argentina -> USD -> ARS.
-    clean_html = re.sub(
-        r"<script.*?</script>|<style.*?</style>",
-        " ",
-        detail_html,
-        flags=re.IGNORECASE | re.DOTALL
-    )
-
-    clean_text = re.sub(
-        r"<[^>]+>",
-        " ",
-        clean_html
-    )
-
-    clean_text = re.sub(
-        r"\s+",
-        " ",
-        clean_text
-    )
-
-    # مثال Xbox-Now: AR Argentina ... 4.68 USD ... 6,959.99 ARS
-    matches = re.findall(
-        r"Image:\s*AR Argentina.*?(\d+(?:[.,]\d+)?)\s*USD.*?(?:[\d.,]+)\s*ARS",
-        clean_text,
-        flags=re.IGNORECASE
-    )
-
-    if not matches:
-        raise Exception("ماكدرت أطلع سعر Argentina بالدولار من Xbox-Now")
-
-    usd_text = matches[0].replace(",", "")
-
-    usd_price = float(usd_text)
-
-    if usd_price <= 0:
-        raise Exception("سعر Argentina غير صالح")
-
-    return usd_price, detail_url
 
 
 def calculate_argentina_sale_price(usd_price):
