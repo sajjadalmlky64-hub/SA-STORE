@@ -1395,7 +1395,8 @@ def get_game_keyboard(
     active,
     show_back=False,
     has_discount=False,
-    is_favorite=False
+    is_favorite=False,
+    allow_alert=True
 ):
 
     buttons = [
@@ -1403,12 +1404,6 @@ def get_game_keyboard(
             InlineKeyboardButton(
                 "🛒 اطلب الآن",
                 callback_data=f"order:{product_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🇦🇷 سعر الأرجنتيني",
-                callback_data=f"argentina:{product_id}"
             )
         ],
         [
@@ -1429,8 +1424,10 @@ def get_game_keyboard(
         ]
     ]
 
-    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة.
-    if not has_discount:
+    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة
+    # وكان السعر المختار من تركيا، لأن تنبيه السعر الحالي
+    # يعتمد على مصدر تركيا الموجود في نظام التنبيهات.
+    if allow_alert and not has_discount:
 
         if active:
 
@@ -1472,7 +1469,7 @@ def get_game_keyboard(
 # إنشاء نتيجة اللعبة
 # =========================================================
 
-def create_game_result(
+async def create_game_result(
     update,
     product_id,
     game_name,
@@ -1483,13 +1480,54 @@ def create_game_result(
     show_back=False
 ):
 
-    store_price = calculate_price(
+    # 🇹🇷 السعر النهائي من تركيا
+    turkey_sale_price = calculate_price(
         turkey_price
     )
 
+    # 🇦🇷 نحاول جلب سعر الأرجنتين تلقائياً.
+    # إذا فشل المصدر، نستخدم تركيا بشكل طبيعي.
+    argentina_sale_price = None
+    argentina_usd_price = None
+
+    try:
+
+        (
+            argentina_usd_price,
+            _argentina_url
+        ) = await asyncio.to_thread(
+            get_argentina_usd_from_xbox_now,
+            game_name
+        )
+
+        _argentina_supplier_cost, argentina_sale_price = calculate_argentina_sale_price(
+            argentina_usd_price
+        )
+
+    except Exception as error:
+
+        print(
+            "ARGENTINA AUTO PRICE ERROR:",
+            product_id,
+            game_name,
+            repr(error)
+        )
+
+    # نختار الأرخص للزبون بدون إظهار اسم الريجن.
+    if (
+        argentina_sale_price is not None
+        and argentina_sale_price < turkey_sale_price
+    ):
+
+        final_price = argentina_sale_price
+        selected_region = "argentina"
+
+    else:
+
+        final_price = turkey_sale_price
+        selected_region = "turkey"
+
     # create_game_result() يُستخدم من الرسائل العادية ومن ضغط الأزرار.
-    # في الرسالة العادية يكون لدينا Update.effective_user،
-    # أما CallbackQuery فالمستخدم موجود في from_user.
     user = getattr(update, "effective_user", None)
 
     if user is None:
@@ -1503,25 +1541,28 @@ def create_game_result(
         product_id,
         game_name,
         reference,
-        store_price
+        final_price
     )
 
+    # معلومات التخفيض تظهر فقط عندما كان السعر التركي هو السعر المختار.
     discount_percent = None
 
-    if (
-        original_price is not None
-        and original_price > turkey_price
-    ):
+    if selected_region == "turkey":
 
-        discount_percent = round(
-            (
+        if (
+            original_price is not None
+            and original_price > turkey_price
+        ):
+
+            discount_percent = round(
                 (
-                    original_price
-                    - turkey_price
-                )
-                / original_price
-            ) * 100
-        )
+                    (
+                        original_price
+                        - turkey_price
+                    )
+                    / original_price
+                ) * 100
+            )
 
     expiry_text = ""
 
@@ -1546,7 +1587,7 @@ def create_game_result(
             )
 
     price_text = format_store_price(
-        store_price
+        final_price
     )
 
     if discount_percent is not None:
@@ -1580,7 +1621,8 @@ def create_game_result(
         favorite_exists(
             user.id,
             product_id
-        )
+        ),
+        allow_alert=(selected_region == "turkey")
     )
 
     return message, keyboard
@@ -1660,7 +1702,7 @@ async def handle_message(
                 text
             )
 
-            message, keyboard = create_game_result(
+            message, keyboard = await create_game_result(
                 update,
                 product_id,
                 game_name,
@@ -1773,7 +1815,7 @@ async def handle_message(
                 end_date
             ) = info
 
-            message, keyboard = create_game_result(
+            message, keyboard = await create_game_result(
                 update,
                 resolved_product_id,
                 game_name,
@@ -2026,7 +2068,7 @@ async def button_handler(
                 end_date
             ) = info
 
-            message, keyboard = create_game_result(
+            message, keyboard = await create_game_result(
                 query,
                 resolved_product_id,
                 game_name,
@@ -2104,82 +2146,6 @@ async def button_handler(
                 buttons
             )
         )
-
-        return
-
-    # =====================================================
-    # 🇦🇷 سعر الأرجنتيني
-    # =====================================================
-
-    if data.startswith("argentina:"):
-
-        product_id = data.split(":", 1)[1].upper()
-
-        last_request = get_last_request(
-            user_id,
-            product_id
-        )
-
-        if not last_request:
-            await query.answer(
-                "❌ ابحث عن اللعبة مرة ثانية.",
-                show_alert=True
-            )
-            return
-
-        game_name, _, _ = last_request
-
-        await query.answer(
-            "⏳ جاري حساب سعر الأرجنتين..."
-        )
-
-        try:
-            usd_price, argentina_url = await asyncio.to_thread(
-                get_argentina_usd_from_xbox_now,
-                game_name
-            )
-
-            supplier_cost, sale_price = calculate_argentina_sale_price(
-                usd_price
-            )
-
-            message = (
-                f"🎮 <b>{game_name}</b>\n\n"
-                "🇦🇷 <b>سعر الأرجنتين</b>\n\n"
-                f"💵 سعر المتجر: <b>${usd_price:.2f}</b>\n"
-                f"🏪 تكلفة التاجر: <b>{format_store_price(supplier_cost)}</b> 🇮🇶\n"
-                f"📈 ربح SA STORE: <b>{format_store_price(ARGENTINA_PROFIT_IQD)}</b>\n"
-                f"💰 <b>سعر البيع: {format_store_price(sale_price)} 🇮🇶</b>"
-            )
-
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🛒 اطلب الآن",
-                        callback_data=f"order:{product_id}"
-                    )
-                ]
-            ])
-
-            await query.edit_message_text(
-                message,
-                parse_mode="HTML",
-                reply_markup=keyboard
-            )
-
-        except Exception as error:
-
-            print(
-                "ARGENTINA PRICE ERROR:",
-                product_id,
-                game_name,
-                repr(error)
-            )
-
-            await query.edit_message_text(
-                "❌ ماكدرت أجيب سعر الأرجنتين حالياً.\n\n"
-                "جرب مرة ثانية بعد شوي."
-            )
 
         return
 
@@ -2377,7 +2343,7 @@ async def button_handler(
                 end_date
             ) = info
 
-            message, keyboard = create_game_result(
+            message, keyboard = await create_game_result(
                 query,
                 resolved_product_id,
                 game_name,
