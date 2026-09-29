@@ -33,6 +33,26 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 ORDER_URL = "https://t.me/Sijadsa"
+
+# =========================================================
+# 🎟️ أكواد ألعاب Xbox
+# =========================================================
+XBOX_CODE_GAMES = [
+    ("Battlefield 4 Premium Edition", "6 ألف"),
+    ("Dying Light Essentials Edition", "8 ألف"),
+    ("Battlefield V Definitive Edition", "8 ألف"),
+    ("Battlefield 1", "7 ألف"),
+    ("FC 26", "23 ألف"),
+    ("FC 27", "89 ألف"),
+    ("Battlefield 1 Revolution", "10 ألف"),
+    ("Darksiders II Deathinitive Edition", "8 ألف"),
+    ("Raft", "7 ألف"),
+    ("Red Dead Redemption 2", "25 ألف"),
+    ("Crash Bandicoot Quadrilogy Bundle", "10 ألف"),
+    ("Dark Souls Remastered", "10 ألف"),
+    ("Battlefield 2042 Elite Edition", "10 ألف"),
+    ("Battlefield 6", "55 ألف"),
+]
 DB_FILE = "price_alerts.db"
 
 if not BOT_TOKEN:
@@ -422,12 +442,6 @@ def get_prices(product):
             )
 
             if not price_data:
-                continue
-
-            # تجاهل العروض المقيدة باشتراك/أهلية مثل Game Pass.
-            # Microsoft يضع عليها RemediationRequired عندما تكون
-            # هناك متطلبات قبل الاستفادة من السعر.
-            if availability.get("RemediationRequired") is True:
                 continue
 
             currency = price_data.get(
@@ -1487,30 +1501,46 @@ def get_remaining_text(end_date):
 
     if days > 1:
 
-        text = f"{days} يوم"
+        text = (
+            f"متبقي: {days} يوم"
+        )
 
         if hours:
-            text += f" و{hours} ساعة"
+            text += (
+                f" و{hours} ساعة"
+            )
 
     elif days == 1:
 
-        text = "يوم واحد"
+        text = "متبقي: يوم واحد"
 
         if hours:
-            text += f" و{hours} ساعة"
+            text += (
+                f" و{hours} ساعة"
+            )
 
     elif hours:
 
-        text = f"{hours} ساعة"
+        text = (
+            f"متبقي: {hours} ساعة"
+        )
 
         if minutes:
-            text += f" و{minutes} دقيقة"
+            text += (
+                f" و{minutes} دقيقة"
+            )
 
     else:
 
-        text = f"{max(minutes, 1)} دقيقة"
+        text = (
+            f"متبقي: {max(minutes, 1)} دقيقة"
+        )
 
-    return text
+    return (
+        text,
+        dt.strftime("%Y-%m-%d"),
+        dt.strftime("%H:%M")
+    )
 
 
 # =========================================================
@@ -1648,15 +1678,22 @@ def create_game_result(
 
     if discount_percent is not None:
 
-        remaining_text = get_remaining_text(
+        remaining = get_remaining_text(
             end_date
         )
 
-        if remaining_text:
+        if remaining:
+
+            (
+                remaining_text,
+                date_text,
+                time_text
+            ) = remaining
 
             expiry_text = (
-                f"\n⏳ <b>باقي على التخفيض:</b> "
-                f"{remaining_text}\n"
+                f"\n⏳ <b>ينتهي التخفيض:</b> "
+                f"{date_text} الساعة {time_text}\n"
+                f"📅 <b>{remaining_text}</b>\n"
             )
 
     price_text = format_store_price(
@@ -1715,17 +1752,24 @@ async def start(
 
     if update.message:
 
-        keyboard = None
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "🎟️ أكواد ألعاب Xbox",
+                    callback_data="xboxcodes"
+                )
+            ]
+        ]
 
         if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🧾 سجل الطلبات",
-                        callback_data="adminorders"
-                    )
-                ]
+            buttons.append([
+                InlineKeyboardButton(
+                    "🧾 سجل الطلبات",
+                    callback_data="adminorders"
+                )
             ])
+
+        keyboard = InlineKeyboardMarkup(buttons)
 
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
@@ -2268,6 +2312,70 @@ async def button_handler(
 
     user = query.from_user
     user_id = user.id
+
+    # =====================================================
+    # 🎟️ أكواد ألعاب Xbox
+    # =====================================================
+
+    if data == "xboxcodes":
+
+        lines = [
+            "🎟️ <b>أكواد ألعاب Xbox</b>",
+            ""
+        ]
+
+        for game_name, price in XBOX_CODE_GAMES:
+            lines.append(
+                f"🎮 {game_name} — <b>{price}</b>"
+            )
+
+        await query.answer()
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🏠 الرئيسية",
+                        callback_data="codeshome"
+                    )
+                ]
+            ])
+        )
+        return
+
+    # =====================================================
+    # الرئيسية
+    # =====================================================
+
+    if data == "codeshome":
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "🎟️ أكواد ألعاب Xbox",
+                    callback_data="xboxcodes"
+                )
+            ]
+        ]
+
+        if ADMIN_CHAT_ID and str(user_id) == str(ADMIN_CHAT_ID):
+            buttons.append([
+                InlineKeyboardButton(
+                    "🧾 سجل الطلبات",
+                    callback_data="adminorders"
+                )
+            ])
+
+        await query.answer()
+        await query.edit_message_text(
+            "🎮 <b>SA STORE</b>\n\n"
+            "أرسل رابط لعبة من Xbox Store\n"
+            "أو اكتب اسم اللعبة 🔍",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
 
     # =====================================================
     # سجل الطلبات - للأدمن فقط
