@@ -424,6 +424,12 @@ def get_prices(product):
             if not price_data:
                 continue
 
+            # تجاهل العروض المقيدة باشتراك/أهلية مثل Game Pass.
+            # Microsoft يضع عليها RemediationRequired عندما تكون
+            # هناك متطلبات قبل الاستفادة من السعر.
+            if availability.get("RemediationRequired") is True:
+                continue
+
             currency = price_data.get(
                 "CurrencyCode",
                 ""
@@ -1481,46 +1487,30 @@ def get_remaining_text(end_date):
 
     if days > 1:
 
-        text = (
-            f"متبقي: {days} يوم"
-        )
+        text = f"{days} يوم"
 
         if hours:
-            text += (
-                f" و{hours} ساعة"
-            )
+            text += f" و{hours} ساعة"
 
     elif days == 1:
 
-        text = "متبقي: يوم واحد"
+        text = "يوم واحد"
 
         if hours:
-            text += (
-                f" و{hours} ساعة"
-            )
+            text += f" و{hours} ساعة"
 
     elif hours:
 
-        text = (
-            f"متبقي: {hours} ساعة"
-        )
+        text = f"{hours} ساعة"
 
         if minutes:
-            text += (
-                f" و{minutes} دقيقة"
-            )
+            text += f" و{minutes} دقيقة"
 
     else:
 
-        text = (
-            f"متبقي: {max(minutes, 1)} دقيقة"
-        )
+        text = f"{max(minutes, 1)} دقيقة"
 
-    return (
-        text,
-        dt.strftime("%Y-%m-%d"),
-        dt.strftime("%H:%M")
-    )
+    return text
 
 
 # =========================================================
@@ -1658,22 +1648,15 @@ def create_game_result(
 
     if discount_percent is not None:
 
-        remaining = get_remaining_text(
+        remaining_text = get_remaining_text(
             end_date
         )
 
-        if remaining:
-
-            (
-                remaining_text,
-                date_text,
-                time_text
-            ) = remaining
+        if remaining_text:
 
             expiry_text = (
-                f"\n⏳ <b>ينتهي التخفيض:</b> "
-                f"{date_text} الساعة {time_text}\n"
-                f"📅 <b>{remaining_text}</b>\n"
+                f"\n⏳ <b>باقي على التخفيض:</b> "
+                f"{remaining_text}\n"
             )
 
     price_text = format_store_price(
