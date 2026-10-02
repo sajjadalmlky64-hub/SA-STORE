@@ -33,26 +33,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 ORDER_URL = "https://t.me/Sijadsa"
-
-# =========================================================
-# 🎟️ أكواد ألعاب Xbox
-# =========================================================
-XBOX_CODE_GAMES = [
-    ("Battlefield 4 Premium Edition", "6 ألف"),
-    ("Dying Light Essentials Edition", "8 ألف"),
-    ("Battlefield V Definitive Edition", "8 ألف"),
-    ("Battlefield 1", "7 ألف"),
-    ("FC 26", "23 ألف"),
-    ("FC 27", "89 ألف"),
-    ("Battlefield 1 Revolution", "10 ألف"),
-    ("Darksiders II Deathinitive Edition", "8 ألف"),
-    ("Raft", "7 ألف"),
-    ("Red Dead Redemption 2", "25 ألف"),
-    ("Crash Bandicoot Quadrilogy Bundle", "10 ألف"),
-    ("Dark Souls Remastered", "10 ألف"),
-    ("Battlefield 2042 Elite Edition", "10 ألف"),
-    ("Battlefield 6", "55 ألف"),
-]
 DB_FILE = "price_alerts.db"
 
 if not BOT_TOKEN:
@@ -1544,6 +1524,31 @@ def get_remaining_text(end_date):
 
 
 # =========================================================
+# تحديد محتوى DLC / الإضافات
+# =========================================================
+
+def is_dlc_title(game_name):
+
+    text = str(game_name or "").strip()
+
+    # نخفي تنبيه السعر عن الـ DLC والإضافات فقط.
+    # لا نعتمد على كلمات عامة مثل Bundle حتى لا نمنع التنبيه
+    # عن الإصدارات والباندلات التي قد تكون لعبة كاملة.
+    patterns = [
+        r"\bDLC\b",
+        r"\bADD[- ]?ON\b",
+        r"\bEXPANSION\b",
+        r"\bEKLENTI\b",
+        r"\bEKLENTİ\b",
+    ]
+
+    return any(
+        re.search(pattern, text, flags=re.IGNORECASE)
+        for pattern in patterns
+    )
+
+
+# =========================================================
 # أزرار اللعبة
 # =========================================================
 
@@ -1552,7 +1557,8 @@ def get_game_keyboard(
     active,
     show_back=False,
     has_discount=False,
-    is_favorite=False
+    is_favorite=False,
+    is_dlc=False
 ):
 
     buttons = [
@@ -1580,8 +1586,8 @@ def get_game_keyboard(
         ]
     ]
 
-    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة.
-    if not has_discount:
+    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة وليست DLC.
+    if not has_discount and not is_dlc:
 
         if active:
 
@@ -1735,7 +1741,8 @@ def create_game_result(
         favorite_exists(
             user.id,
             product_id
-        )
+        ),
+        is_dlc=is_dlc_title(game_name)
     )
 
     return message, keyboard
@@ -1752,24 +1759,17 @@ async def start(
 
     if update.message:
 
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "🎟️ أكواد ألعاب Xbox",
-                    callback_data="xboxcodes"
-                )
-            ]
-        ]
+        keyboard = None
 
         if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
-            buttons.append([
-                InlineKeyboardButton(
-                    "🧾 سجل الطلبات",
-                    callback_data="adminorders"
-                )
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🧾 سجل الطلبات",
+                        callback_data="adminorders"
+                    )
+                ]
             ])
-
-        keyboard = InlineKeyboardMarkup(buttons)
 
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
@@ -2167,6 +2167,10 @@ async def check_price_alerts(
                 turkey_price
             )
 
+            if is_dlc_title(new_game_name):
+                deactivate_alert(alert_id)
+                continue
+
             if new_price < old_price:
 
                 message = (
@@ -2290,7 +2294,7 @@ async def alert_loop(
             )
 
         await asyncio.sleep(
-            3600
+            172800
         )
 
 
@@ -2312,70 +2316,6 @@ async def button_handler(
 
     user = query.from_user
     user_id = user.id
-
-    # =====================================================
-    # 🎟️ أكواد ألعاب Xbox
-    # =====================================================
-
-    if data == "xboxcodes":
-
-        lines = [
-            "🎟️ <b>أكواد ألعاب Xbox</b>",
-            ""
-        ]
-
-        for game_name, price in XBOX_CODE_GAMES:
-            lines.append(
-                f"🎮 {game_name} — <b>{price}</b>"
-            )
-
-        await query.answer()
-        await query.edit_message_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🏠 الرئيسية",
-                        callback_data="codeshome"
-                    )
-                ]
-            ])
-        )
-        return
-
-    # =====================================================
-    # الرئيسية
-    # =====================================================
-
-    if data == "codeshome":
-
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "🎟️ أكواد ألعاب Xbox",
-                    callback_data="xboxcodes"
-                )
-            ]
-        ]
-
-        if ADMIN_CHAT_ID and str(user_id) == str(ADMIN_CHAT_ID):
-            buttons.append([
-                InlineKeyboardButton(
-                    "🧾 سجل الطلبات",
-                    callback_data="adminorders"
-                )
-            ])
-
-        await query.answer()
-        await query.edit_message_text(
-            "🎮 <b>SA STORE</b>\n\n"
-            "أرسل رابط لعبة من Xbox Store\n"
-            "أو اكتب اسم اللعبة 🔍",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return
 
     # =====================================================
     # سجل الطلبات - للأدمن فقط
@@ -2699,7 +2639,8 @@ async def button_handler(
                 alert_exists(user_id, product_id),
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=has_discount,
-                is_favorite=True
+                is_favorite=True,
+                is_dlc=is_dlc_title(game_name)
             )
         )
         return
@@ -2718,6 +2659,7 @@ async def button_handler(
         # نعيد جلب معلومات آخر طلب حتى نعرف هل عليها تخفيض أم لا.
         last_request = get_last_request(user_id, product_id)
         has_discount = False
+        current_game_name = last_request[0] if last_request else ""
 
         if last_request:
             try:
@@ -2725,7 +2667,7 @@ async def button_handler(
                     get_game_info_by_product_id,
                     product_id
                 )
-                _, _, turkey_price, original_price, _ = info
+                _, current_game_name, turkey_price, original_price, _ = info
                 has_discount = (
                     original_price is not None
                     and original_price > turkey_price
@@ -2739,7 +2681,8 @@ async def button_handler(
                 alert_exists(user_id, product_id),
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=has_discount,
-                is_favorite=False
+                is_favorite=False,
+                is_dlc=is_dlc_title(current_game_name)
             )
         )
         return
@@ -2860,6 +2803,13 @@ async def button_handler(
             current_price
         ) = last_request
 
+        if is_dlc_title(game_name):
+            await query.answer(
+                "ℹ️ تنبيهات الأسعار غير متاحة للـ DLC والإضافات.",
+                show_alert=True
+            )
+            return
+
         added = add_alert(
             user_id,
             query.message.chat_id,
@@ -2889,7 +2839,8 @@ async def button_handler(
                 True,
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=False,
-                is_favorite=favorite_exists(user_id, product_id)
+                is_favorite=favorite_exists(user_id, product_id),
+                is_dlc=is_dlc_title(game_name)
             )
         )
 
@@ -2932,13 +2883,17 @@ async def button_handler(
                 show_alert=True
             )
 
+            cancel_request = get_last_request(user_id, product_id)
+            cancel_game_name = cancel_request[0] if cancel_request else ""
+
             await query.edit_message_reply_markup(
                 reply_markup=get_game_keyboard(
                     product_id,
                     False,
                     show_back=True,
                     has_discount=False,
-                    is_favorite=favorite_exists(user_id, product_id)
+                    is_favorite=favorite_exists(user_id, product_id),
+                    is_dlc=is_dlc_title(cancel_game_name)
                 )
             )
 
