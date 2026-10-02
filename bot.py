@@ -1740,6 +1740,11 @@ def create_game_result(
             f"<b>{price_text}</b> 🇮🇶"
         )
 
+    is_dlc = (
+        is_dlc_title(game_name)
+        or is_dlc_title(display_game_name)
+    )
+
     keyboard = get_game_keyboard(
         product_id,
         alert_exists(
@@ -1752,7 +1757,7 @@ def create_game_result(
             user.id,
             product_id
         ),
-        is_dlc=is_dlc_title(game_name)
+        is_dlc=is_dlc
     )
 
     return message, keyboard
