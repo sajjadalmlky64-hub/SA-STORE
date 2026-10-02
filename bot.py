@@ -1531,25 +1531,49 @@ def is_dlc_title(game_name):
 
     text = str(game_name or "").strip()
 
-    # نخفي تنبيه السعر عن الـ DLC والإضافات فقط.
-    # لا نعتمد على كلمات عامة مثل Bundle حتى لا نمنع التنبيه
-    # عن الإصدارات والباندلات التي قد تكون لعبة كاملة.
+    # نخفي تنبيه السعر عن DLC والإضافات والمحتوى الإضافي.
+    # بعض إضافات Xbox ما يكون مكتوب عليها DLC صراحة، مثل V-Bucks
+    # والعملات داخل الألعاب وContent/Character/Map Packs.
+    # لذلك نتحقق من مجموعة كلمات واضحة تدل على محتوى إضافي،
+    # مع تجنب كلمات عامة مثل Bundle أو Edition حتى لا نحجب الألعاب الكاملة.
     patterns = [
+        # DLC / Add-ons / Expansions
         r"\bDLC\b",
         r"\bADD[- ]?ON\b",
+        r"\bADDON\b",
         r"\bEXPANSION\b",
+        r"\bEXPANSION PACK\b",
+        r"\bCONTENT PACK\b",
+        r"\bCHARACTER PACK\b",
+        r"\bMAP PACK\b",
+        r"\bWEAPON PACK\b",
+        r"\bSKIN PACK\b",
+        r"\bITEM PACK\b",
+        r"\bSEASON PASS\b",
+        r"\bUPGRADE\b",
+        r"\bDELUXE UPGRADE\b",
         r"\bEKLENTI\b",
         r"\bEKLENTİ\b",
-        # كثير من صفحات Xbox تسمي الـ DLC بصيغة Pack / Paket
-        # مثل: Streets of London Pack / Streets of London Paket
-        r"\bPACK\b",
-        r"\bPAKET\b",
-        r"\bSEASON[ -]?PASS\b",
-        r"\bCHARACTER[ -]?PACK\b",
-        r"\bSTORY[ -]?PACK\b",
-        r"\bMISSION[ -]?PACK\b",
-        r"\bCONTENT[ -]?PACK\b",
-        r"\bWEAPON[ -]?PACK\b",
+
+        # In-game currency / points / credits
+        r"\bV[- ]?BUCKS\b",
+        r"\bV[- ]?PAPEL\b",
+        r"\bFIFA POINTS?\b",
+        r"\bFC POINTS?\b",
+        r"\bMADDEN POINTS?\b",
+        r"\bPOINTS?\b",
+        r"\bCOINS?\b",
+        r"\bCREDITS?\b",
+        r"\bTOKENS?\b",
+        r"\bIN[- ]GAME CURRENCY\b",
+        r"\bGAME CURRENCY\b",
+
+        # Turkish / Arabic descriptions commonly used for add-ons
+        r"\bEK PAKET\b",
+        r"\bGENİŞLEME\b",
+        r"\bGENISLEME\b",
+        r"إضافة",
+        r"محتوى إضافي",
     ]
 
     return any(
@@ -1740,11 +1764,6 @@ def create_game_result(
             f"<b>{price_text}</b> 🇮🇶"
         )
 
-    is_dlc = (
-        is_dlc_title(game_name)
-        or is_dlc_title(display_game_name)
-    )
-
     keyboard = get_game_keyboard(
         product_id,
         alert_exists(
@@ -1757,7 +1776,7 @@ def create_game_result(
             user.id,
             product_id
         ),
-        is_dlc=is_dlc
+        is_dlc=is_dlc_title(game_name)
     )
 
     return message, keyboard
