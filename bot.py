@@ -1540,6 +1540,16 @@ def is_dlc_title(game_name):
         r"\bEXPANSION\b",
         r"\bEKLENTI\b",
         r"\bEKLENTİ\b",
+        # كثير من صفحات Xbox تسمي الـ DLC بصيغة Pack / Paket
+        # مثل: Streets of London Pack / Streets of London Paket
+        r"\bPACK\b",
+        r"\bPAKET\b",
+        r"\bSEASON[ -]?PASS\b",
+        r"\bCHARACTER[ -]?PACK\b",
+        r"\bSTORY[ -]?PACK\b",
+        r"\bMISSION[ -]?PACK\b",
+        r"\bCONTENT[ -]?PACK\b",
+        r"\bWEAPON[ -]?PACK\b",
     ]
 
     return any(
