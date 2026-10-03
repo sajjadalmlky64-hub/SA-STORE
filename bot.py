@@ -1531,49 +1531,15 @@ def is_dlc_title(game_name):
 
     text = str(game_name or "").strip()
 
-    # نخفي تنبيه السعر عن DLC والإضافات والمحتوى الإضافي.
-    # بعض إضافات Xbox ما يكون مكتوب عليها DLC صراحة، مثل V-Bucks
-    # والعملات داخل الألعاب وContent/Character/Map Packs.
-    # لذلك نتحقق من مجموعة كلمات واضحة تدل على محتوى إضافي،
-    # مع تجنب كلمات عامة مثل Bundle أو Edition حتى لا نحجب الألعاب الكاملة.
+    # نخفي تنبيه السعر عن الـ DLC والإضافات فقط.
+    # لا نعتمد على كلمات عامة مثل Bundle حتى لا نمنع التنبيه
+    # عن الإصدارات والباندلات التي قد تكون لعبة كاملة.
     patterns = [
-        # DLC / Add-ons / Expansions
         r"\bDLC\b",
         r"\bADD[- ]?ON\b",
-        r"\bADDON\b",
         r"\bEXPANSION\b",
-        r"\bEXPANSION PACK\b",
-        r"\bCONTENT PACK\b",
-        r"\bCHARACTER PACK\b",
-        r"\bMAP PACK\b",
-        r"\bWEAPON PACK\b",
-        r"\bSKIN PACK\b",
-        r"\bITEM PACK\b",
-        r"\bSEASON PASS\b",
-        r"\bUPGRADE\b",
-        r"\bDELUXE UPGRADE\b",
         r"\bEKLENTI\b",
         r"\bEKLENTİ\b",
-
-        # In-game currency / points / credits
-        r"\bV[- ]?BUCKS\b",
-        r"\bV[- ]?PAPEL\b",
-        r"\bFIFA POINTS?\b",
-        r"\bFC POINTS?\b",
-        r"\bMADDEN POINTS?\b",
-        r"\bPOINTS?\b",
-        r"\bCOINS?\b",
-        r"\bCREDITS?\b",
-        r"\bTOKENS?\b",
-        r"\bIN[- ]GAME CURRENCY\b",
-        r"\bGAME CURRENCY\b",
-
-        # Turkish / Arabic descriptions commonly used for add-ons
-        r"\bEK PAKET\b",
-        r"\bGENİŞLEME\b",
-        r"\bGENISLEME\b",
-        r"إضافة",
-        r"محتوى إضافي",
     ]
 
     return any(
@@ -1793,22 +1759,17 @@ async def start(
 
     if update.message:
 
-        keyboard = None
+        buttons = [
+            [InlineKeyboardButton("💱 حاسبة الليرات", callback_data="liracalc")]
+        ]
 
         if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🧾 سجل الطلبات",
-                        callback_data="adminorders"
-                    )
-                ]
-            ])
+            buttons.append([InlineKeyboardButton("🧾 سجل الطلبات", callback_data="adminorders")])
 
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
             "أو اكتب اسم اللعبة 🔍",
-            reply_markup=keyboard
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
 
 
@@ -1900,6 +1861,40 @@ async def handle_message(
         return
 
     text = update.message.text.strip()
+
+    if context.user_data.pop("lira_calc", False):
+        try:
+            amount = float(
+                text.replace(",", ".")
+                    .replace("₺", "")
+                    .replace("TL", "")
+                    .replace("TRY", "")
+                    .strip()
+            )
+            if amount <= 0:
+                raise ValueError
+
+            store_price = calculate_price(amount)
+            amount_text = str(int(amount)) if amount.is_integer() else f"{amount:g}"
+
+            await update.message.reply_text(
+                "💱 <b>حاسبة الليرات التركية</b>\n\n"
+                f"🇹🇷 المبلغ: <b>{amount_text} ليرة</b>\n"
+                f"🇮🇶 سعر SA STORE: <b>{format_store_price(store_price)}</b>\n\n"
+                "🔄 اكتب مبلغ ثاني إذا تريد تحسب مرة ثانية.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💱 حاسبة الليرات", callback_data="liracalc")],
+                    [InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]
+                ])
+            )
+            return
+        except Exception:
+            await update.message.reply_text(
+                "❌ المبلغ غير صحيح.\n\nاكتب مثلاً: <b>500</b> ليرة.",
+                parse_mode="HTML"
+            )
+            return
 
     if len(text) < 2:
         return
@@ -2350,6 +2345,30 @@ async def button_handler(
 
     user = query.from_user
     user_id = user.id
+
+    if data == "liracalc":
+        context.user_data["lira_calc"] = True
+        await query.answer()
+        await query.edit_message_text(
+            "💱 <b>حاسبة الليرات التركية</b>\n\n"
+            "أرسل مبلغ الليرات فقط، مثلاً: <code>500</code>\n\n"
+            "وأحسب لك سعره حسب تسعيرة SA STORE 🇮🇶.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]])
+        )
+        return
+
+    if data == "home":
+        context.user_data.pop("lira_calc", None)
+        await query.answer()
+        buttons = [[InlineKeyboardButton("💱 حاسبة الليرات", callback_data="liracalc")]]
+        if ADMIN_CHAT_ID and str(user_id) == str(ADMIN_CHAT_ID):
+            buttons.append([InlineKeyboardButton("🧾 سجل الطلبات", callback_data="adminorders")])
+        await query.edit_message_text(
+            "🎮 أرسل رابط لعبة من Xbox Store\nأو اكتب اسم اللعبة 🔍",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
 
     # =====================================================
     # سجل الطلبات - للأدمن فقط
