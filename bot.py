@@ -424,6 +424,12 @@ def get_prices(product):
             if not price_data:
                 continue
 
+            # تجاهل العروض المقيدة باشتراك/أهلية مثل Game Pass.
+            # Microsoft يضع عليها RemediationRequired عندما تكون
+            # هناك متطلبات قبل الاستفادة من السعر.
+            if availability.get("RemediationRequired") is True:
+                continue
+
             currency = price_data.get(
                 "CurrencyCode",
                 ""
@@ -566,35 +572,11 @@ def best_price(items):
 
     if discounted:
 
-        # إذا Microsoft أعاد أكثر من سعر مخفّض لنفس المنتج،
-        # نختار السعر الأكثر تكراراً. عند التعادل نختار الأعلى
-        # حتى لا يظهر سعر أقل من سعر المتجر بالخطأ.
-        counts = Counter(
-            round(x[0], 2)
-            for x in discounted
+        discounted.sort(
+            key=lambda x: x[0]
         )
 
-        best_count = max(counts.values())
-        candidates = [
-            price for price, count in counts.items()
-            if count == best_count
-        ]
-        price = max(candidates)
-
-        matching = [
-            item for item in discounted
-            if round(item[0], 2) == price
-        ]
-
-        # نفس السعر المخفّض قد يظهر بأكثر من MSRP في استجابات Microsoft.
-        # نختار أعلى MSRP حتى تكون نسبة الخصم مبنية على السعر الأصلي
-        # الحقيقي الظاهر في المتجر، بدل اختيار أول Availability فقط.
-        matching.sort(
-            key=lambda x: (x[1], x[2] or ""),
-            reverse=True
-        )
-
-        return matching[0]
+        return discounted[0]
 
     if not valid:
         return None, None, None
@@ -604,22 +586,9 @@ def best_price(items):
         for x in valid
     )
 
-    best_count = max(counter.values())
-    candidates = [
-        price for price, count in counter.items()
-        if count == best_count
-    ]
-    price = max(candidates)
+    price = counter.most_common(1)[0][0]
 
-    matching = [
-        item for item in valid
-        if round(item[0], 2) == price
-    ]
-    matching.sort(
-        key=lambda x: (x[2] or "")
-    )
-
-    return matching[0][0], matching[0][1], matching[0][2]
+    return price, None, None
 
 
 # =========================================================
@@ -679,55 +648,9 @@ def get_game_info(url):
             "ماكدر أطلع Product ID من الرابط"
         )
 
-    # المحاولة الأساسية: الـ Product ID الموجود بالرابط.
-    try:
-        return get_game_info_by_product_id(product_id)
-    except Exception as direct_error:
-        print("DIRECT URL LOOKUP FAILED:", product_id, repr(direct_error))
-
-    # احتياط: بعض روابط Xbox القديمة/المحدّثة يكون الـID فيها
-    # غير قابل للاسترجاع مباشرة من Display Catalog. نستخدم slug
-    # من الرابط ونبحث عن المنتج الحالي بدل إرجاع خطأ للمستخدم.
-    try:
-        from urllib.parse import urlparse
-
-        path = urlparse(str(url)).path.strip("/")
-        parts = [part for part in path.split("/") if part]
-
-        slug = None
-        for index, part in enumerate(parts):
-            if part.lower() == "store" and index + 1 < len(parts):
-                slug = parts[index + 1]
-                break
-
-        if slug:
-            query = re.sub(r"[-_]+", " ", slug).strip()
-
-            results = search_xbox_games_enhanced(
-                query,
-                10
-            )
-
-            for alternative_id, alternative_name in results:
-                try:
-                    info = get_game_info_by_product_id(
-                        alternative_id
-                    )
-                    SEARCH_RESULT_CACHE[product_id] = info
-                    SEARCH_RESULT_CACHE[alternative_id] = info
-                    return info
-                except Exception as alternative_error:
-                    print(
-                        "URL FALLBACK FAILED:",
-                        alternative_id,
-                        alternative_name,
-                        repr(alternative_error)
-                    )
-
-    except Exception as fallback_error:
-        print("URL SLUG FALLBACK ERROR:", repr(fallback_error))
-
-    raise direct_error
+    return get_game_info_by_product_id(
+        product_id
+    )
 
 
 # =========================================================
@@ -1564,68 +1487,30 @@ def get_remaining_text(end_date):
 
     if days > 1:
 
-        text = (
-            f"متبقي: {days} يوم"
-        )
+        text = f"{days} يوم"
 
         if hours:
-            text += (
-                f" و{hours} ساعة"
-            )
+            text += f" و{hours} ساعة"
 
     elif days == 1:
 
-        text = "متبقي: يوم واحد"
+        text = "يوم واحد"
 
         if hours:
-            text += (
-                f" و{hours} ساعة"
-            )
+            text += f" و{hours} ساعة"
 
     elif hours:
 
-        text = (
-            f"متبقي: {hours} ساعة"
-        )
+        text = f"{hours} ساعة"
 
         if minutes:
-            text += (
-                f" و{minutes} دقيقة"
-            )
+            text += f" و{minutes} دقيقة"
 
     else:
 
-        text = (
-            f"متبقي: {max(minutes, 1)} دقيقة"
-        )
+        text = f"{max(minutes, 1)} دقيقة"
 
-    return (
-        text,
-        dt.strftime("%Y-%m-%d"),
-        dt.strftime("%H:%M")
-    )
-
-
-# =========================================================
-# تمييز DLC / الإضافات
-# =========================================================
-
-def is_dlc_title(game_name):
-
-    title = str(game_name or "").lower()
-
-    markers = (
-        "dlc",
-        "add-on",
-        "addon",
-        "add on",
-        "expansion",
-        "season pass",
-        "content pack",
-        "expansion pass"
-    )
-
-    return any(marker in title for marker in markers)
+    return text
 
 
 # =========================================================
@@ -1637,8 +1522,7 @@ def get_game_keyboard(
     active,
     show_back=False,
     has_discount=False,
-    is_favorite=False,
-    game_name=None
+    is_favorite=False
 ):
 
     buttons = [
@@ -1666,9 +1550,8 @@ def get_game_keyboard(
         ]
     ]
 
-    # زر التنبيه يظهر فقط للألعاب العادية غير المخفضة.
-    # DLC / Add-On / Expansion لا يظهر لها زر التنبيه.
-    if not has_discount and not is_dlc_title(game_name):
+    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة.
+    if not has_discount:
 
         if active:
 
@@ -1765,29 +1648,16 @@ def create_game_result(
 
     if discount_percent is not None:
 
-        dt = parse_end_date(end_date)
+        remaining_text = get_remaining_text(
+            end_date
+        )
 
-        if dt:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            else:
-                dt = dt.astimezone(timezone.utc)
+        if remaining_text:
 
-            seconds_left = int(
-                (dt - datetime.now(timezone.utc)).total_seconds()
+            expiry_text = (
+                f"\n⏳ <b>باقي على التخفيض:</b> "
+                f"{remaining_text}\n"
             )
-
-            if seconds_left > 0:
-                days_left = seconds_left // 86400
-
-                if days_left > 0:
-                    expiry_text = (
-                        f"📅 <b>متبقي: {days_left} يوم</b>\n"
-                    )
-                else:
-                    expiry_text = (
-                        "📅 <b>متبقي: أقل من يوم</b>\n"
-                    )
 
     price_text = format_store_price(
         store_price
@@ -1828,53 +1698,10 @@ def create_game_result(
         favorite_exists(
             user.id,
             product_id
-        ),
-        game_name=game_name
+        )
     )
 
     return message, keyboard
-
-
-# =========================================================
-# حاسبة الليرات التركية
-# =========================================================
-
-def parse_lira_amount(text):
-
-    value = str(text or "").strip().lower()
-    value = value.replace("ليرة", "")
-    value = value.replace("ليرات", "")
-    value = value.replace("try", "")
-    value = value.replace("tl", "")
-    value = value.replace("₺", "")
-    value = value.replace(",", ".")
-    value = value.strip()
-
-    try:
-        amount = float(value)
-    except Exception:
-        return None
-
-    if amount <= 0:
-        return None
-
-    return amount
-
-
-def calculator_result(amount):
-
-    price = calculate_price(amount)
-
-    if price % 1000 == 0:
-        price_text = f"{price // 1000} ألف"
-    else:
-        price_text = format_store_price(price)
-
-    return (
-        "💱 <b>حاسبة الليرات التركية</b>\n\n"
-        f"🇹🇷 <b>{amount:g} ليرة</b>\n"
-        f"🇮🇶 <b>{price_text}</b>"
-    )
 
 
 # =========================================================
@@ -1888,24 +1715,17 @@ async def start(
 
     if update.message:
 
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "💱 حاسبة الليرات",
-                    callback_data="calculator"
-                )
-            ]
-        ]
+        keyboard = None
 
         if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
-            buttons.append([
-                InlineKeyboardButton(
-                    "🧾 سجل الطلبات",
-                    callback_data="adminorders"
-                )
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🧾 سجل الطلبات",
+                        callback_data="adminorders"
+                    )
+                ]
             ])
-
-        keyboard = InlineKeyboardMarkup(buttons)
 
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
@@ -2002,36 +1822,6 @@ async def handle_message(
         return
 
     text = update.message.text.strip()
-
-    # إذا المستخدم فتح الحاسبة، الرقم ينحسب مباشرة.
-    if context.user_data.get("calculator_mode"):
-
-        amount = parse_lira_amount(text)
-
-        if amount is not None:
-            context.user_data["calculator_mode"] = False
-
-            await update.message.reply_text(
-                calculator_result(amount),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "💱 حساب مبلغ آخر",
-                            callback_data="calculator"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "🏠 الرئيسية",
-                            callback_data="home"
-                        )
-                    ]
-                ])
-            )
-            return
-
-        context.user_data["calculator_mode"] = False
 
     if len(text) < 2:
         return
@@ -2456,7 +2246,7 @@ async def alert_loop(
             )
 
         await asyncio.sleep(
-            172800
+            3600
         )
 
 
@@ -2478,31 +2268,6 @@ async def button_handler(
 
     user = query.from_user
     user_id = user.id
-
-    # =====================================================
-    # حاسبة الليرات التركية
-    # =====================================================
-
-    if data == "calculator":
-
-        await query.answer()
-        context.user_data["calculator_mode"] = True
-
-        await query.edit_message_text(
-            "💱 <b>حاسبة الليرات التركية</b>\n\n"
-            "أرسل المبلغ بالليرة التركية فقط.\n"
-            "مثال: <code>500</code>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🏠 الرئيسية",
-                        callback_data="adminhome"
-                    )
-                ]
-            ])
-        )
-        return
 
     # =====================================================
     # سجل الطلبات - للأدمن فقط
@@ -2568,41 +2333,6 @@ async def button_handler(
         return
 
     # =====================================================
-    # الرئيسية
-    # =====================================================
-
-    if data == "home":
-
-        context.user_data["calculator_mode"] = False
-        await query.answer()
-
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "💱 حاسبة الليرات",
-                    callback_data="calculator"
-                )
-            ]
-        ]
-
-        if ADMIN_CHAT_ID and str(user_id) == str(ADMIN_CHAT_ID):
-            buttons.append([
-                InlineKeyboardButton(
-                    "🧾 سجل الطلبات",
-                    callback_data="adminorders"
-                )
-            ])
-
-        await query.edit_message_text(
-            "🎮 <b>SA STORE</b>\n\n"
-            "أرسل رابط لعبة من Xbox Store\n"
-            "أو اكتب اسم اللعبة 🔍",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        return
-
-    # =====================================================
     # الرئيسية - للأدمن
     # =====================================================
 
@@ -2622,12 +2352,6 @@ async def button_handler(
             "أو اكتب اسم اللعبة 🔍",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "💱 حاسبة الليرات",
-                        callback_data="calculator"
-                    )
-                ],
                 [
                     InlineKeyboardButton(
                         "🧾 سجل الطلبات",
@@ -2867,8 +2591,7 @@ async def button_handler(
                 alert_exists(user_id, product_id),
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=has_discount,
-                is_favorite=True,
-                game_name=(last_request[0] if last_request else None)
+                is_favorite=True
             )
         )
         return
@@ -2908,8 +2631,7 @@ async def button_handler(
                 alert_exists(user_id, product_id),
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=has_discount,
-                is_favorite=False,
-                game_name=(last_request[0] if last_request else None)
+                is_favorite=False
             )
         )
         return
@@ -3059,8 +2781,7 @@ async def button_handler(
                 True,
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=False,
-                is_favorite=favorite_exists(user_id, product_id),
-                game_name=game_name
+                is_favorite=favorite_exists(user_id, product_id)
             )
         )
 
@@ -3103,19 +2824,13 @@ async def button_handler(
                 show_alert=True
             )
 
-            last_request = get_last_request(user_id, product_id)
-            game_name_for_keyboard = (
-                last_request[0] if last_request else None
-            )
-
             await query.edit_message_reply_markup(
                 reply_markup=get_game_keyboard(
                     product_id,
                     False,
                     show_back=True,
                     has_discount=False,
-                    is_favorite=favorite_exists(user_id, product_id),
-                    game_name=game_name_for_keyboard
+                    is_favorite=favorite_exists(user_id, product_id)
                 )
             )
 
