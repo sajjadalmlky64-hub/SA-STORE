@@ -572,8 +572,16 @@ def best_price(items):
 
     if discounted:
 
+        # إذا كانت Microsoft ترجع أكثر من Availability لنفس السعر،
+        # قد يكون لكل واحدة MSRP مختلف (مثلاً 231₺ و925₺ لنفس 185₺).
+        # نختار السعر الحالي الأرخص أولاً، وعند تساويه نختار أعلى MSRP
+        # حتى تظهر نسبة الخصم الحقيقية، مع الاحتفاظ بتاريخ انتهاء العرض
+        # المرتبط بنفس Availability.
         discounted.sort(
-            key=lambda x: x[0]
+            key=lambda x: (
+                x[0],
+                -x[1]
+            )
         )
 
         return discounted[0]
