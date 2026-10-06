@@ -327,17 +327,22 @@ def to_float(value):
 # جلب بيانات المنتج
 # =========================================================
 
-def get_product_data(product_id):
+def get_product_data(product_id, market="TR", languages=None):
 
     url = (
         "https://displaycatalog.mp.microsoft.com/"
         "v7.0/products"
     )
 
+    market = (market or "TR").upper()
+
+    if languages is None:
+        languages = "tr-TR,en-US" if market == "TR" else "en-US,en"
+
     params = {
         "bigIds": product_id,
-        "market": "TR",
-        "languages": "tr-TR,en-US",
+        "market": market,
+        "languages": languages,
         "fieldsTemplate": "Details",
         "actionFilter": "Browse"
     }
@@ -572,16 +577,8 @@ def best_price(items):
 
     if discounted:
 
-        # إذا كانت Microsoft ترجع أكثر من Availability لنفس السعر،
-        # قد يكون لكل واحدة MSRP مختلف (مثلاً 231₺ و925₺ لنفس 185₺).
-        # نختار السعر الحالي الأرخص أولاً، وعند تساويه نختار أعلى MSRP
-        # حتى تظهر نسبة الخصم الحقيقية، مع الاحتفاظ بتاريخ انتهاء العرض
-        # المرتبط بنفس Availability.
         discounted.sort(
-            key=lambda x: (
-                x[0],
-                -x[1]
-            )
+            key=lambda x: x[0]
         )
 
         return discounted[0]
@@ -644,6 +641,119 @@ def get_game_info_by_product_id(product_id):
 # معلومات اللعبة من الرابط
 # =========================================================
 
+def get_url_market(url):
+    """استخراج الـ market من رابط Xbox بدون استخدامه كتسعيرة."""
+    match = re.search(
+        r"xbox\.com/([a-z]{2})-([a-z]{2})/",
+        str(url or ""),
+        flags=re.IGNORECASE
+    )
+
+    if not match:
+        return None
+
+    return match.group(2).upper()
+
+
+def get_slug_from_url(url):
+    """استخراج اسم المنتج من slug كخطة احتياطية."""
+    match = re.search(
+        r"/games/store/([^/?#]+)/[A-Za-z0-9]{12}(?:[/?#]|$)",
+        str(url or ""),
+        flags=re.IGNORECASE
+    )
+
+    if not match:
+        return None
+
+    slug = match.group(1)
+    slug = re.sub(r"[-_]+", " ", slug)
+    slug = re.sub(r"\s+", " ", slug).strip()
+
+    return slug
+
+
+def get_turkish_info_from_other_region(product_id, url):
+    """
+    إذا الرابط من Region غير تركي، نستخدم الـ Product ID الموجود
+    فقط للتعرّف على اسم اللعبة، ثم نبحث عن نفس الإصدار في TR
+    ونجلب السعر والتخفيض من المتجر التركي حصراً.
+    """
+
+    source_market = get_url_market(url)
+    source_name = None
+
+    # أول محاولة: جلب اسم المنتج من نفس Region الموجود في الرابط.
+    if source_market and source_market != "TR":
+        try:
+            source_product = get_product_data(
+                product_id,
+                market=source_market
+            )
+            source_name = get_game_name(source_product)
+        except Exception as error:
+            print(
+                "SOURCE REGION LOOKUP FAILED:",
+                source_market,
+                product_id,
+                repr(error)
+            )
+
+    # إذا فشل جلب الاسم، نستخدم slug الموجود بالرابط.
+    if not source_name:
+        source_name = get_slug_from_url(url)
+
+    if not source_name:
+        raise Exception(
+            "ماكدرت أحدد اسم اللعبة من الرابط"
+        )
+
+    # البحث هنا دائماً TR، مهما كان Region الرابط الأصلي.
+    turkey_results = search_xbox_games_enhanced(
+        source_name,
+        top=10
+    )
+
+    if not turkey_results:
+        raise Exception(
+            "ماكدرت ألقى نفس اللعبة بالستور التركي"
+        )
+
+    # نختار النتيجة الأقرب للاسم، مع الحفاظ على الـ Edition.
+    normalized_source = normalize_edition_name(source_name)
+    ranked = []
+
+    for turkey_id, turkey_title in turkey_results:
+        score = search_similarity(
+            normalized_source,
+            normalize_edition_name(turkey_title)
+        )
+        ranked.append((score, turkey_id, turkey_title))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+
+    best_score, turkey_id, turkey_title = ranked[0]
+
+    if best_score < 0.60:
+        raise Exception(
+            "ماكدرت أحدد الإصدار المطابق بالستور التركي"
+        )
+
+    print(
+        "REGION NORMALIZED:",
+        source_market,
+        "-> TR |",
+        source_name,
+        "=>",
+        turkey_title,
+        turkey_id
+    )
+
+    return get_game_info_by_product_id(
+        turkey_id
+    )
+
+
 def get_game_info(url):
 
     product_id = get_product_id(
@@ -656,8 +766,18 @@ def get_game_info(url):
             "ماكدر أطلع Product ID من الرابط"
         )
 
-    return get_game_info_by_product_id(
-        product_id
+    market = get_url_market(url)
+
+    # روابط TR تبقى على المسار الأصلي السريع.
+    if market in (None, "TR"):
+        return get_game_info_by_product_id(
+            product_id
+        )
+
+    # أي Region آخر: نتجاهل سعره ونحوّل الطلب إلى TR.
+    return get_turkish_info_from_other_region(
+        product_id,
+        url
     )
 
 
