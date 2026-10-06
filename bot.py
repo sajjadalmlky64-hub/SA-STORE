@@ -586,8 +586,12 @@ def best_price(items):
             if round(item[0], 2) == price
         ]
 
+        # نفس السعر المخفّض قد يظهر بأكثر من MSRP في استجابات Microsoft.
+        # نختار أعلى MSRP حتى تكون نسبة الخصم مبنية على السعر الأصلي
+        # الحقيقي الظاهر في المتجر، بدل اختيار أول Availability فقط.
         matching.sort(
-            key=lambda x: (x[2] or "")
+            key=lambda x: (x[1], x[2] or ""),
+            reverse=True
         )
 
         return matching[0]
