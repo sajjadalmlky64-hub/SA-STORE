@@ -1524,65 +1524,6 @@ def get_remaining_text(end_date):
 
 
 # =========================================================
-# تحديد محتوى DLC / الإضافات
-# =========================================================
-
-def is_dlc_title(game_name):
-
-    text = str(game_name or "").strip()
-
-    # نخفي تنبيه السعر عن DLC والإضافات والمحتوى الإضافي.
-    # بعض إضافات Xbox ما يكون مكتوب عليها DLC صراحة، مثل V-Bucks
-    # والعملات داخل الألعاب وContent/Character/Map Packs.
-    # لذلك نتحقق من مجموعة كلمات واضحة تدل على محتوى إضافي،
-    # مع تجنب كلمات عامة مثل Bundle أو Edition حتى لا نحجب الألعاب الكاملة.
-    patterns = [
-        # DLC / Add-ons / Expansions
-        r"\bDLC\b",
-        r"\bADD[- ]?ON\b",
-        r"\bADDON\b",
-        r"\bEXPANSION\b",
-        r"\bEXPANSION PACK\b",
-        r"\bCONTENT PACK\b",
-        r"\bCHARACTER PACK\b",
-        r"\bMAP PACK\b",
-        r"\bWEAPON PACK\b",
-        r"\bSKIN PACK\b",
-        r"\bITEM PACK\b",
-        r"\bSEASON PASS\b",
-        r"\bUPGRADE\b",
-        r"\bDELUXE UPGRADE\b",
-        r"\bEKLENTI\b",
-        r"\bEKLENTİ\b",
-
-        # In-game currency / points / credits
-        r"\bV[- ]?BUCKS\b",
-        r"\bV[- ]?PAPEL\b",
-        r"\bFIFA POINTS?\b",
-        r"\bFC POINTS?\b",
-        r"\bMADDEN POINTS?\b",
-        r"\bPOINTS?\b",
-        r"\bCOINS?\b",
-        r"\bCREDITS?\b",
-        r"\bTOKENS?\b",
-        r"\bIN[- ]GAME CURRENCY\b",
-        r"\bGAME CURRENCY\b",
-
-        # Turkish / Arabic descriptions commonly used for add-ons
-        r"\bEK PAKET\b",
-        r"\bGENİŞLEME\b",
-        r"\bGENISLEME\b",
-        r"إضافة",
-        r"محتوى إضافي",
-    ]
-
-    return any(
-        re.search(pattern, text, flags=re.IGNORECASE)
-        for pattern in patterns
-    )
-
-
-# =========================================================
 # أزرار اللعبة
 # =========================================================
 
@@ -1591,8 +1532,7 @@ def get_game_keyboard(
     active,
     show_back=False,
     has_discount=False,
-    is_favorite=False,
-    is_dlc=False
+    is_favorite=False
 ):
 
     buttons = [
@@ -1620,8 +1560,8 @@ def get_game_keyboard(
         ]
     ]
 
-    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة وليست DLC.
-    if not has_discount and not is_dlc:
+    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة.
+    if not has_discount:
 
         if active:
 
@@ -1775,8 +1715,7 @@ def create_game_result(
         favorite_exists(
             user.id,
             product_id
-        ),
-        is_dlc=is_dlc_title(game_name)
+        )
     )
 
     return message, keyboard
@@ -2201,10 +2140,6 @@ async def check_price_alerts(
                 turkey_price
             )
 
-            if is_dlc_title(new_game_name):
-                deactivate_alert(alert_id)
-                continue
-
             if new_price < old_price:
 
                 message = (
@@ -2328,7 +2263,7 @@ async def alert_loop(
             )
 
         await asyncio.sleep(
-            172800
+            3600
         )
 
 
@@ -2673,8 +2608,7 @@ async def button_handler(
                 alert_exists(user_id, product_id),
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=has_discount,
-                is_favorite=True,
-                is_dlc=is_dlc_title(game_name)
+                is_favorite=True
             )
         )
         return
@@ -2693,7 +2627,6 @@ async def button_handler(
         # نعيد جلب معلومات آخر طلب حتى نعرف هل عليها تخفيض أم لا.
         last_request = get_last_request(user_id, product_id)
         has_discount = False
-        current_game_name = last_request[0] if last_request else ""
 
         if last_request:
             try:
@@ -2701,7 +2634,7 @@ async def button_handler(
                     get_game_info_by_product_id,
                     product_id
                 )
-                _, current_game_name, turkey_price, original_price, _ = info
+                _, _, turkey_price, original_price, _ = info
                 has_discount = (
                     original_price is not None
                     and original_price > turkey_price
@@ -2715,8 +2648,7 @@ async def button_handler(
                 alert_exists(user_id, product_id),
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=has_discount,
-                is_favorite=False,
-                is_dlc=is_dlc_title(current_game_name)
+                is_favorite=False
             )
         )
         return
@@ -2837,13 +2769,6 @@ async def button_handler(
             current_price
         ) = last_request
 
-        if is_dlc_title(game_name):
-            await query.answer(
-                "ℹ️ تنبيهات الأسعار غير متاحة للـ DLC والإضافات.",
-                show_alert=True
-            )
-            return
-
         added = add_alert(
             user_id,
             query.message.chat_id,
@@ -2873,8 +2798,7 @@ async def button_handler(
                 True,
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=False,
-                is_favorite=favorite_exists(user_id, product_id),
-                is_dlc=is_dlc_title(game_name)
+                is_favorite=favorite_exists(user_id, product_id)
             )
         )
 
@@ -2917,17 +2841,13 @@ async def button_handler(
                 show_alert=True
             )
 
-            cancel_request = get_last_request(user_id, product_id)
-            cancel_game_name = cancel_request[0] if cancel_request else ""
-
             await query.edit_message_reply_markup(
                 reply_markup=get_game_keyboard(
                     product_id,
                     False,
                     show_back=True,
                     has_discount=False,
-                    is_favorite=favorite_exists(user_id, product_id),
-                    is_dlc=is_dlc_title(cancel_game_name)
+                    is_favorite=favorite_exists(user_id, product_id)
                 )
             )
 
