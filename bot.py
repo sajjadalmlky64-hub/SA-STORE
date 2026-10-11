@@ -399,66 +399,16 @@ def get_game_name(product):
 
 def get_prices(product):
 
-    """
-    استخراج سعر المتجر من الـ SKU الأساسي فقط.
-
-    Microsoft قد يعيد أكثر من SKU/Availability لنفس المنتج،
-    ومنها عروض Game Pass أو عروض أخرى، لذلك اختيار أرخص رقم
-    من كل النتائج ممكن يسبب تسعير خاطئ ويضر المتجر.
-    نستخدم PreferredSkuId لتحديد الـ SKU الأساسي للمنتج.
-    """
+    results = []
 
     sku_availabilities = product.get(
         "DisplaySkuAvailabilities",
         []
     )
 
-    preferred_sku_id = str(
-        product.get("PreferredSkuId") or ""
-    ).strip()
+    for sku_data in sku_availabilities:
 
-    selected_groups = []
-
-    for group in sku_availabilities:
-
-        sku = group.get("Sku", {}) or {}
-        sku_id = str(
-            sku.get("SkuId") or ""
-        ).strip()
-
-        properties = sku.get("Properties", {}) or {}
-
-        if properties.get("IsTrial") is True:
-            continue
-
-        if str(sku.get("SkuType", "")).lower() == "trial":
-            continue
-
-        if preferred_sku_id and sku_id == preferred_sku_id:
-            selected_groups.append(group)
-
-    # إذا PreferredSkuId غير موجود أو لم نجد المجموعة،
-    # نستخدم أول SKU غير تجريبي كخطة احتياطية.
-    if not selected_groups:
-
-        for group in sku_availabilities:
-
-            sku = group.get("Sku", {}) or {}
-            properties = sku.get("Properties", {}) or {}
-
-            if properties.get("IsTrial") is True:
-                continue
-
-            if str(sku.get("SkuType", "")).lower() == "trial":
-                continue
-
-            selected_groups.append(group)
-
-    candidates = []
-
-    for group in selected_groups:
-
-        for availability in group.get(
+        for availability in sku_data.get(
             "Availabilities",
             []
         ):
@@ -474,12 +424,18 @@ def get_prices(product):
             if not price_data:
                 continue
 
-            currency = str(
-                price_data.get("CurrencyCode", "")
-            ).upper()
+            currency = price_data.get(
+                "CurrencyCode",
+                ""
+            )
 
-            if currency not in ("TRY", "TL"):
-                continue
+            if currency:
+
+                if currency.upper() not in (
+                    "TRY",
+                    "TL"
+                ):
+                    continue
 
             current = to_float(
                 price_data.get("ListPrice")
@@ -489,7 +445,10 @@ def get_prices(product):
                 price_data.get("MSRP")
             )
 
-            if current is None or current <= 0:
+            if current is None:
+                continue
+
+            if current <= 0:
                 continue
 
             end_date = availability.get(
@@ -499,86 +458,30 @@ def get_prices(product):
                 "EndDate"
             )
 
-            if original is not None and original > current:
-                discount = (
-                    (original - current) / original
-                ) * 100
-            else:
-                discount = 0
-                original = None
+            if (
+                original is not None
+                and original > current
+            ):
 
-            actions = availability.get("Actions", []) or []
-            action_text = {str(x).lower() for x in actions}
-
-            # الأفضلية للـ availability القابلة للشراء فعلياً.
-            if "license" in action_text:
-                action_rank = 0
-            elif "fulfill" in action_text:
-                action_rank = 1
-            elif "browse" in action_text:
-                action_rank = 2
-            else:
-                action_rank = 3
-
-            try:
-                display_rank = int(
-                    availability.get("DisplayRank", 999999)
+                results.append(
+                    (
+                        current,
+                        original,
+                        end_date
+                    )
                 )
-            except Exception:
-                display_rank = 999999
 
-            candidates.append({
-                "current": float(current),
-                "original": original,
-                "end_date": end_date,
-                "discount": discount,
-                "action_rank": action_rank,
-                "display_rank": display_rank,
-            })
+            else:
 
-    if not candidates:
-        return []
+                results.append(
+                    (
+                        current,
+                        None,
+                        end_date
+                    )
+                )
 
-    # نختار العرض الأساسي، وليس أرخص عرض عشوائي من كل الـSKUs.
-    candidates.sort(
-        key=lambda item: (
-            item["action_rank"],
-            item["display_rank"],
-            0 if item["original"] is not None else 1,
-        )
-    )
-
-    chosen_rank = (
-        candidates[0]["action_rank"],
-        candidates[0]["display_rank"]
-    )
-
-    same_primary = [
-        item for item in candidates
-        if (
-            item["action_rank"],
-            item["display_rank"]
-        ) == chosen_rank
-    ]
-
-    # إذا توجد عدة سجلات بنفس الأولوية، نختار التخفيض الحقيقي،
-    # وإن تساوت الأولوية نأخذ السعر الأقل ضمن نفس العرض.
-    discounted = [
-        item for item in same_primary
-        if item["original"] is not None
-        and item["original"] > item["current"]
-    ]
-
-    pool = discounted or same_primary
-    chosen = min(pool, key=lambda item: item["current"])
-
-    return [
-        (
-            chosen["current"],
-            chosen["original"],
-            chosen["end_date"]
-        )
-    ]
+    return results
 
 
 # =========================================================
@@ -931,18 +834,6 @@ def normalize_edition_name(title):
 def normalize_search_text(text):
     text = str(text or "").lower().strip()
     text = text.replace("’", "'").replace("–", "-").replace("—", "-")
-
-    # توحيد الأرقام العربية والفارسية حتى ينجح البحث مثل: قراند ٥.
-    digit_map = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
-    text = text.translate(digit_map)
-
-    # توحيد أشكال الحروف العربية وإزالة التشكيل والتطويل.
-    text = text.translate(str.maketrans({
-        "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا",
-        "ى": "ي", "ئ": "ي", "ؤ": "و", "ة": "ه",
-        "ـ": "", "ک": "ك", "ی": "ي"
-    }))
-    text = re.sub(r"[\u064b-\u065f\u0670]", "", text)
     text = re.sub(r"[^a-z0-9\u0600-\u06ff]+", " ", text)
     text = re.sub(
         r"\b(edition|sürüm|version)\b",
@@ -950,116 +841,6 @@ def normalize_search_text(text):
         text
     )
     return re.sub(r"\s+", " ", text).strip()
-
-
-# أسماء عربية واختصارات شائعة لألعاب Xbox. نوجّهها إلى الاسم الإنجليزي
-# الذي يفهمه Microsoft Store، من دون تغيير الاسم المعروض أو بيانات السعر.
-ARABIC_GAME_ALIASES = {
-    "ريد ديد 2": "Red Dead Redemption 2",
-    "ريد ديد ريدمبشن 2": "Red Dead Redemption 2",
-    "ريد ديد ريدمبشن": "Red Dead Redemption 2",
-    "ريد ديد": "Red Dead Redemption 2",
-    "rdr2": "Red Dead Redemption 2",
-    "قراند 5": "Grand Theft Auto V",
-    "قراند ٥": "Grand Theft Auto V",
-    "قراند 5 اونلاين": "Grand Theft Auto V",
-    "قراند": "Grand Theft Auto V",
-    "جراند 5": "Grand Theft Auto V",
-    "جراند ثفت اوتو 5": "Grand Theft Auto V",
-    "gta 5": "Grand Theft Auto V",
-    "gta v": "Grand Theft Auto V",
-    "gta 6": "Grand Theft Auto VI",
-    "قراند 6": "Grand Theft Auto VI",
-    "قراند ٦": "Grand Theft Auto VI",
-    "فيفا 26": "EA SPORTS FC 26",
-    "فيفا 25": "EA SPORTS FC 25",
-    "فيفا 24": "EA SPORTS FC 24",
-    "اف سي 26": "EA SPORTS FC 26",
-    "اف سي 25": "EA SPORTS FC 25",
-    "fc 26": "EA SPORTS FC 26",
-    "كول اوف ديوتي": "Call of Duty",
-    "كول اوف ديوتي بلاك اوبس 6": "Call of Duty Black Ops 6",
-    "بلاك اوبس 6": "Call of Duty Black Ops 6",
-    "بلاك اوبس 7": "Call of Duty Black Ops 7",
-    "كول اوف ديوتي وورزون": "Call of Duty Warzone",
-    "ماينكرافت": "Minecraft",
-    "ماين كرافت": "Minecraft",
-    "فورزا هورايزن 5": "Forza Horizon 5",
-    "فورزا هورايزن 4": "Forza Horizon 4",
-    "فورزا": "Forza Horizon 5",
-    "فورزا موتورسبورت": "Forza Motorsport",
-    "ايلدن رينغ": "Elden Ring",
-    "إلدن رينغ": "Elden Ring",
-    "الدن رينغ": "Elden Ring",
-    "سايبربنك": "Cyberpunk 2077",
-    "سايبر بانك 2077": "Cyberpunk 2077",
-    "سايبر بنك": "Cyberpunk 2077",
-    "ريد ديد اونلاين": "Red Dead Online",
-    "اساسنز كريد": "Assassin's Creed",
-    "اساسنز كريد ميراج": "Assassin's Creed Mirage",
-    "اساسنز كريد فالهالا": "Assassin's Creed Valhalla",
-    "اساسنز كريد شادو": "Assassin's Creed Shadows",
-    "قاتل العقيدة": "Assassin's Creed",
-    "هالو": "Halo",
-    "هيت مان": "Hitman",
-    "ويتشر 3": "The Witcher 3 Wild Hunt",
-    "ذا ويتشر 3": "The Witcher 3 Wild Hunt",
-    "دارك سولز 3": "Dark Souls III",
-    "سيكيرو": "Sekiro Shadows Die Twice",
-    "إف سي 26": "EA SPORTS FC 26",
-    "فورتنايت": "Fortnite",
-    "فورت نايت": "Fortnite",
-    "روكيت ليق": "Rocket League",
-    "روكيت ليغ": "Rocket League",
-    "فيفا": "EA SPORTS FC 26",
-}
-
-
-def arabic_search_variants(query):
-    """يرجع الاسم الإنجليزي المقابل للاسم العربي أو للاختصار المعروف."""
-    normalized = normalize_search_text(query)
-    if not normalized:
-        return []
-
-    variants = []
-    # المطابقة الأطول أولاً لتجنب أن تتغلب كلمة عامة على اسم إصدار أدق.
-    aliases = sorted(
-        ARABIC_GAME_ALIASES.items(),
-        key=lambda item: len(normalize_search_text(item[0])),
-        reverse=True
-    )
-
-    # الأولوية دائماً للمطابقة الكاملة حتى لا نكرر رقم الإصدار
-    # إذا كان الرقم موجوداً أصلاً في الاسم الإنجليزي المقابل.
-    for alias, english_name in aliases:
-        if normalized == normalize_search_text(alias):
-            variants.append(english_name)
-            break
-
-    if not variants:
-        for alias, english_name in aliases:
-            alias_norm = normalize_search_text(alias)
-            if len(alias_norm) >= 5 and re.search(
-                r"(?<!\w)" + re.escape(alias_norm) + r"(?!\w)",
-                normalized
-            ):
-                # نحتفظ بالكلمات الإضافية إن كانت موجودة، لكن لا نكرر الرقم
-                # إذا كان جزءاً من الاسم الإنجليزي المقابل.
-                suffix = normalized.replace(alias_norm, " ").strip()
-                candidate_norm = normalize_search_text(english_name)
-                if suffix and suffix not in candidate_norm:
-                    candidate = english_name + " " + suffix
-                else:
-                    candidate = english_name
-                variants.append(candidate)
-                break
-
-    # بعض المستخدمين يكتبون الاسم العربي مع سنة/رقم الإصدار.
-    if re.search(r"[\u0600-\u06ff]", normalized):
-        for arabic, western in (("١", "1"), ("٢", "2"), ("٣", "3"), ("٤", "4"), ("٥", "5"), ("٦", "6"), ("٧", "7"), ("٨", "8"), ("٩", "9"), ("٠", "0")):
-            normalized = normalized.replace(arabic, western)
-
-    return list(dict.fromkeys(v for v in variants if v))
 
 
 def search_similarity(query, title):
@@ -1214,52 +995,32 @@ def generate_typo_variants(query, max_variants=12):
 
 def search_xbox_games_enhanced(query, top=5):
     """
-    بحث ذكي يدعم الأسماء العربية والاختصارات، ثم البحث الأصلي
-    وتصحيح الأخطاء الإملائية. تُزال النتائج المكررة حسب Product ID.
+    البحث العادي أولاً.
+    إذا لم نجد نتائج، نجرب تصحيحات إملائية بسيطة.
     """
-    queries = []
+    results = search_xbox_games(query, top)
 
-    # الأسماء العربية والاختصارات أولاً حتى لا تعيد نتائج غير مرتبطة
-    # من خدمة autosuggest عند إرسال نص عربي مباشرة.
-    queries.extend(arabic_search_variants(query))
-    queries.append(str(query or "").strip())
+    if results:
+        return results
 
-    # جرّب تهجئات بديلة للاسم الإنجليزي بعد تحويل الاسم العربي.
-    for candidate in list(queries):
-        if not re.search(r"[\u0600-\u06ff]", candidate):
-            queries.extend(generate_typo_variants(candidate, max_variants=6))
-
-    unique_queries = []
-    seen_queries = set()
-    for candidate in queries:
-        key = normalize_search_text(candidate)
-        if key and key not in seen_queries:
-            seen_queries.add(key)
-            unique_queries.append(candidate)
-
-    combined = []
-    seen_ids = set()
-    for candidate in unique_queries:
+    for variant in generate_typo_variants(query):
         try:
-            found = search_xbox_games(candidate, top)
+            variant_results = search_xbox_games(
+                variant,
+                top
+            )
+
+            if variant_results:
+                return variant_results
+
         except Exception as error:
-            print("ENHANCED SEARCH FAILED:", candidate, repr(error))
-            continue
+            print(
+                "TYPO SEARCH FAILED:",
+                variant,
+                repr(error)
+            )
 
-        for product_id, title in found:
-            product_id = str(product_id).upper()
-            if product_id in seen_ids:
-                continue
-            seen_ids.add(product_id)
-            combined.append((product_id, title))
-            if len(combined) >= top:
-                return combined
-
-        # إذا الاسم الأصلي أعطى نتائج، ما نحتاج نرسل طلبات إضافية.
-        if found and normalize_search_text(candidate) == normalize_search_text(query):
-            break
-
-    return combined
+    return []
 
 # =========================================================
 # حل نتيجة البحث بشكل موثوق
@@ -1685,44 +1446,139 @@ def get_remaining_text(end_date):
         return None
 
     if dt.tzinfo is None:
+
         dt = dt.replace(
             tzinfo=timezone.utc
         )
+
     else:
+
         dt = dt.astimezone(
             timezone.utc
         )
 
     remaining = (
-        dt - datetime.now(timezone.utc)
+        dt
+        - datetime.now(timezone.utc)
     )
+
+    if remaining.total_seconds() <= 0:
+        return None
 
     seconds = int(
         remaining.total_seconds()
     )
 
-    if seconds <= 0:
-        return None
+    days = seconds // 86400
 
-    # المطلوب للمستخدم: عدد الأيام فقط، بدون ساعات/دقائق.
-    days = max(
-        1,
-        math.ceil(seconds / 86400)
-    )
+    hours = (
+        seconds % 86400
+    ) // 3600
 
-    if days == 1:
+    minutes = (
+        seconds % 3600
+    ) // 60
+
+    if days > 1:
+
+        text = (
+            f"متبقي: {days} يوم"
+        )
+
+        if hours:
+            text += (
+                f" و{hours} ساعة"
+            )
+
+    elif days == 1:
+
         text = "متبقي: يوم واحد"
-    elif days == 2:
-        text = "متبقي: يومين"
-    elif days <= 10:
-        text = f"متبقي: {days} أيام"
+
+        if hours:
+            text += (
+                f" و{hours} ساعة"
+            )
+
+    elif hours:
+
+        text = (
+            f"متبقي: {hours} ساعة"
+        )
+
+        if minutes:
+            text += (
+                f" و{minutes} دقيقة"
+            )
+
     else:
-        text = f"متبقي: {days} يوم"
+
+        text = (
+            f"متبقي: {max(minutes, 1)} دقيقة"
+        )
 
     return (
         text,
         dt.strftime("%Y-%m-%d"),
         dt.strftime("%H:%M")
+    )
+
+
+# =========================================================
+# تحديد محتوى DLC / الإضافات
+# =========================================================
+
+def is_dlc_title(game_name):
+
+    text = str(game_name or "").strip()
+
+    # نخفي تنبيه السعر عن DLC والإضافات والمحتوى الإضافي.
+    # بعض إضافات Xbox ما يكون مكتوب عليها DLC صراحة، مثل V-Bucks
+    # والعملات داخل الألعاب وContent/Character/Map Packs.
+    # لذلك نتحقق من مجموعة كلمات واضحة تدل على محتوى إضافي،
+    # مع تجنب كلمات عامة مثل Bundle أو Edition حتى لا نحجب الألعاب الكاملة.
+    patterns = [
+        # DLC / Add-ons / Expansions
+        r"\bDLC\b",
+        r"\bADD[- ]?ON\b",
+        r"\bADDON\b",
+        r"\bEXPANSION\b",
+        r"\bEXPANSION PACK\b",
+        r"\bCONTENT PACK\b",
+        r"\bCHARACTER PACK\b",
+        r"\bMAP PACK\b",
+        r"\bWEAPON PACK\b",
+        r"\bSKIN PACK\b",
+        r"\bITEM PACK\b",
+        r"\bSEASON PASS\b",
+        r"\bUPGRADE\b",
+        r"\bDELUXE UPGRADE\b",
+        r"\bEKLENTI\b",
+        r"\bEKLENTİ\b",
+
+        # In-game currency / points / credits
+        r"\bV[- ]?BUCKS\b",
+        r"\bV[- ]?PAPEL\b",
+        r"\bFIFA POINTS?\b",
+        r"\bFC POINTS?\b",
+        r"\bMADDEN POINTS?\b",
+        r"\bPOINTS?\b",
+        r"\bCOINS?\b",
+        r"\bCREDITS?\b",
+        r"\bTOKENS?\b",
+        r"\bIN[- ]GAME CURRENCY\b",
+        r"\bGAME CURRENCY\b",
+
+        # Turkish / Arabic descriptions commonly used for add-ons
+        r"\bEK PAKET\b",
+        r"\bGENİŞLEME\b",
+        r"\bGENISLEME\b",
+        r"إضافة",
+        r"محتوى إضافي",
+    ]
+
+    return any(
+        re.search(pattern, text, flags=re.IGNORECASE)
+        for pattern in patterns
     )
 
 
@@ -1764,7 +1620,7 @@ def get_game_keyboard(
         ]
     ]
 
-    # زر التنبيه يظهر فقط للعبة الأساسية غير المخفضة.
+    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة وليست DLC.
     if not has_discount and not is_dlc:
 
         if active:
@@ -1875,7 +1731,9 @@ def create_game_result(
             ) = remaining
 
             expiry_text = (
-                f"\n📅 <b>{remaining_text}</b>\n"
+                f"\n⏳ <b>ينتهي التخفيض:</b> "
+                f"{date_text} الساعة {time_text}\n"
+                f"📅 <b>{remaining_text}</b>\n"
             )
 
     price_text = format_store_price(
@@ -1891,6 +1749,8 @@ def create_game_result(
         message = (
             f"🎮 <b>{display_game_name}</b>\n\n"
             "🔥 <b>اللعبة عليها تخفيض!</b>\n\n"
+            f"📉 نسبة الخصم: "
+            f"<b>{discount_percent}%</b>\n"
             f"{expiry_text}\n"
             f"💰 سعر اللعبة: "
             f"<b>{price_text}</b> 🇮🇶"
@@ -1916,28 +1776,10 @@ def create_game_result(
             user.id,
             product_id
         ),
-        is_dlc=is_dlc_or_addon(game_name)
+        is_dlc=is_dlc_title(game_name)
     )
 
     return message, keyboard
-
-
-async def lira_calculator_start(update, context):
-
-    query = update.callback_query
-    await query.answer()
-    context.user_data["waiting_lira_amount"] = True
-
-    await query.edit_message_text(
-        "💱 <b>حاسبة الليرات التركية</b>\n\n"
-        "أرسل عدد الليرات فقط، مثال:\n"
-        "<code>500</code>\n\n"
-        "وأحسبها لك بسعر SA STORE 🇮🇶",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]
-        ])
-    )
 
 
 # =========================================================
@@ -1953,24 +1795,15 @@ async def start(
 
         keyboard = None
 
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "💱 حاسبة الليرات",
-                    callback_data="lira_calc"
-                )
-            ]
-        ]
-
         if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
-            buttons.append([
-                InlineKeyboardButton(
-                    "🧾 سجل الطلبات",
-                    callback_data="adminorders"
-                )
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🧾 سجل الطلبات",
+                        callback_data="adminorders"
+                    )
+                ]
             ])
-
-        keyboard = InlineKeyboardMarkup(buttons)
 
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
@@ -2067,43 +1900,6 @@ async def handle_message(
         return
 
     text = update.message.text.strip()
-
-    if context.user_data.get("waiting_lira_amount"):
-
-        raw = text.replace(",", ".").strip()
-
-        try:
-            amount = float(raw)
-        except Exception:
-            await update.message.reply_text(
-                "❌ ارسل رقم الليرات فقط، مثال: 500"
-            )
-            return
-
-        if amount <= 0:
-            await update.message.reply_text(
-                "❌ لازم المبلغ يكون أكبر من صفر."
-            )
-            return
-
-        if amount > 1000000:
-            await update.message.reply_text(
-                "❌ المبلغ كبير جداً."
-            )
-            return
-
-        context.user_data["waiting_lira_amount"] = False
-
-        price = calculate_price(amount)
-        await update.message.reply_text(
-            f"💱 <b>{amount:g} ليرة تركية</b>\n\n"
-            f"🇮🇶 سعر SA STORE: <b>{format_store_price(price)}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💱 حاسبة ثانية", callback_data="lira_calc")]
-            ])
-        )
-        return
 
     if len(text) < 2:
         return
@@ -2405,6 +2201,10 @@ async def check_price_alerts(
                 turkey_price
             )
 
+            if is_dlc_title(new_game_name):
+                deactivate_alert(alert_id)
+                continue
+
             if new_price < old_price:
 
                 message = (
@@ -2547,21 +2347,6 @@ async def button_handler(
         return
 
     data = query.data or ""
-
-    if data == "lira_calc":
-        await lira_calculator_start(update, context)
-        return
-
-    if data == "home":
-        await query.answer()
-        context.user_data["waiting_lira_amount"] = False
-        await query.edit_message_text(
-            "🎮 أرسل رابط لعبة من Xbox Store\nأو اكتب اسم اللعبة 🔍",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💱 حاسبة الليرات", callback_data="lira_calc")]
-            ])
-        )
-        return
 
     user = query.from_user
     user_id = user.id
@@ -2888,7 +2673,8 @@ async def button_handler(
                 alert_exists(user_id, product_id),
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=has_discount,
-                is_favorite=True
+                is_favorite=True,
+                is_dlc=is_dlc_title(game_name)
             )
         )
         return
@@ -2907,6 +2693,7 @@ async def button_handler(
         # نعيد جلب معلومات آخر طلب حتى نعرف هل عليها تخفيض أم لا.
         last_request = get_last_request(user_id, product_id)
         has_discount = False
+        current_game_name = last_request[0] if last_request else ""
 
         if last_request:
             try:
@@ -2914,7 +2701,7 @@ async def button_handler(
                     get_game_info_by_product_id,
                     product_id
                 )
-                _, _, turkey_price, original_price, _ = info
+                _, current_game_name, turkey_price, original_price, _ = info
                 has_discount = (
                     original_price is not None
                     and original_price > turkey_price
@@ -2928,7 +2715,8 @@ async def button_handler(
                 alert_exists(user_id, product_id),
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=has_discount,
-                is_favorite=False
+                is_favorite=False,
+                is_dlc=is_dlc_title(current_game_name)
             )
         )
         return
@@ -3049,6 +2837,13 @@ async def button_handler(
             current_price
         ) = last_request
 
+        if is_dlc_title(game_name):
+            await query.answer(
+                "ℹ️ تنبيهات الأسعار غير متاحة للـ DLC والإضافات.",
+                show_alert=True
+            )
+            return
+
         added = add_alert(
             user_id,
             query.message.chat_id,
@@ -3078,7 +2873,8 @@ async def button_handler(
                 True,
                 show_back=user_id in SEARCH_SELECTIONS,
                 has_discount=False,
-                is_favorite=favorite_exists(user_id, product_id)
+                is_favorite=favorite_exists(user_id, product_id),
+                is_dlc=is_dlc_title(game_name)
             )
         )
 
@@ -3121,13 +2917,17 @@ async def button_handler(
                 show_alert=True
             )
 
+            cancel_request = get_last_request(user_id, product_id)
+            cancel_game_name = cancel_request[0] if cancel_request else ""
+
             await query.edit_message_reply_markup(
                 reply_markup=get_game_keyboard(
                     product_id,
                     False,
                     show_back=True,
                     has_discount=False,
-                    is_favorite=favorite_exists(user_id, product_id)
+                    is_favorite=favorite_exists(user_id, product_id),
+                    is_dlc=is_dlc_title(cancel_game_name)
                 )
             )
 
