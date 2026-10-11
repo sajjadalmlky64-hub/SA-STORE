@@ -399,16 +399,66 @@ def get_game_name(product):
 
 def get_prices(product):
 
-    results = []
+    """
+    استخراج سعر المتجر من الـ SKU الأساسي فقط.
+
+    Microsoft قد يعيد أكثر من SKU/Availability لنفس المنتج،
+    ومنها عروض Game Pass أو عروض أخرى، لذلك اختيار أرخص رقم
+    من كل النتائج ممكن يسبب تسعير خاطئ ويضر المتجر.
+    نستخدم PreferredSkuId لتحديد الـ SKU الأساسي للمنتج.
+    """
 
     sku_availabilities = product.get(
         "DisplaySkuAvailabilities",
         []
     )
 
-    for sku_data in sku_availabilities:
+    preferred_sku_id = str(
+        product.get("PreferredSkuId") or ""
+    ).strip()
 
-        for availability in sku_data.get(
+    selected_groups = []
+
+    for group in sku_availabilities:
+
+        sku = group.get("Sku", {}) or {}
+        sku_id = str(
+            sku.get("SkuId") or ""
+        ).strip()
+
+        properties = sku.get("Properties", {}) or {}
+
+        if properties.get("IsTrial") is True:
+            continue
+
+        if str(sku.get("SkuType", "")).lower() == "trial":
+            continue
+
+        if preferred_sku_id and sku_id == preferred_sku_id:
+            selected_groups.append(group)
+
+    # إذا PreferredSkuId غير موجود أو لم نجد المجموعة،
+    # نستخدم أول SKU غير تجريبي كخطة احتياطية.
+    if not selected_groups:
+
+        for group in sku_availabilities:
+
+            sku = group.get("Sku", {}) or {}
+            properties = sku.get("Properties", {}) or {}
+
+            if properties.get("IsTrial") is True:
+                continue
+
+            if str(sku.get("SkuType", "")).lower() == "trial":
+                continue
+
+            selected_groups.append(group)
+
+    candidates = []
+
+    for group in selected_groups:
+
+        for availability in group.get(
             "Availabilities",
             []
         ):
@@ -424,18 +474,12 @@ def get_prices(product):
             if not price_data:
                 continue
 
-            currency = price_data.get(
-                "CurrencyCode",
-                ""
-            )
+            currency = str(
+                price_data.get("CurrencyCode", "")
+            ).upper()
 
-            if currency:
-
-                if currency.upper() not in (
-                    "TRY",
-                    "TL"
-                ):
-                    continue
+            if currency not in ("TRY", "TL"):
+                continue
 
             current = to_float(
                 price_data.get("ListPrice")
@@ -445,10 +489,7 @@ def get_prices(product):
                 price_data.get("MSRP")
             )
 
-            if current is None:
-                continue
-
-            if current <= 0:
+            if current is None or current <= 0:
                 continue
 
             end_date = availability.get(
@@ -458,30 +499,86 @@ def get_prices(product):
                 "EndDate"
             )
 
-            if (
-                original is not None
-                and original > current
-            ):
-
-                results.append(
-                    (
-                        current,
-                        original,
-                        end_date
-                    )
-                )
-
+            if original is not None and original > current:
+                discount = (
+                    (original - current) / original
+                ) * 100
             else:
+                discount = 0
+                original = None
 
-                results.append(
-                    (
-                        current,
-                        None,
-                        end_date
-                    )
+            actions = availability.get("Actions", []) or []
+            action_text = {str(x).lower() for x in actions}
+
+            # الأفضلية للـ availability القابلة للشراء فعلياً.
+            if "license" in action_text:
+                action_rank = 0
+            elif "fulfill" in action_text:
+                action_rank = 1
+            elif "browse" in action_text:
+                action_rank = 2
+            else:
+                action_rank = 3
+
+            try:
+                display_rank = int(
+                    availability.get("DisplayRank", 999999)
                 )
+            except Exception:
+                display_rank = 999999
 
-    return results
+            candidates.append({
+                "current": float(current),
+                "original": original,
+                "end_date": end_date,
+                "discount": discount,
+                "action_rank": action_rank,
+                "display_rank": display_rank,
+            })
+
+    if not candidates:
+        return []
+
+    # نختار العرض الأساسي، وليس أرخص عرض عشوائي من كل الـSKUs.
+    candidates.sort(
+        key=lambda item: (
+            item["action_rank"],
+            item["display_rank"],
+            0 if item["original"] is not None else 1,
+        )
+    )
+
+    chosen_rank = (
+        candidates[0]["action_rank"],
+        candidates[0]["display_rank"]
+    )
+
+    same_primary = [
+        item for item in candidates
+        if (
+            item["action_rank"],
+            item["display_rank"]
+        ) == chosen_rank
+    ]
+
+    # إذا توجد عدة سجلات بنفس الأولوية، نختار التخفيض الحقيقي،
+    # وإن تساوت الأولوية نأخذ السعر الأقل ضمن نفس العرض.
+    discounted = [
+        item for item in same_primary
+        if item["original"] is not None
+        and item["original"] > item["current"]
+    ]
+
+    pool = discounted or same_primary
+    chosen = min(pool, key=lambda item: item["current"])
+
+    return [
+        (
+            chosen["current"],
+            chosen["original"],
+            chosen["end_date"]
+        )
+    ]
 
 
 # =========================================================
@@ -1446,75 +1543,39 @@ def get_remaining_text(end_date):
         return None
 
     if dt.tzinfo is None:
-
         dt = dt.replace(
             tzinfo=timezone.utc
         )
-
     else:
-
         dt = dt.astimezone(
             timezone.utc
         )
 
     remaining = (
-        dt
-        - datetime.now(timezone.utc)
+        dt - datetime.now(timezone.utc)
     )
-
-    if remaining.total_seconds() <= 0:
-        return None
 
     seconds = int(
         remaining.total_seconds()
     )
 
-    days = seconds // 86400
+    if seconds <= 0:
+        return None
 
-    hours = (
-        seconds % 86400
-    ) // 3600
+    # المطلوب للمستخدم: عدد الأيام فقط، بدون ساعات/دقائق.
+    days = max(
+        1,
+        math.ceil(seconds / 86400)
+    )
 
-    minutes = (
-        seconds % 3600
-    ) // 60
-
-    if days > 1:
-
-        text = (
-            f"متبقي: {days} يوم"
-        )
-
-        if hours:
-            text += (
-                f" و{hours} ساعة"
-            )
-
-    elif days == 1:
-
+    if days == 1:
         text = "متبقي: يوم واحد"
-
-        if hours:
-            text += (
-                f" و{hours} ساعة"
-            )
-
-    elif hours:
-
-        text = (
-            f"متبقي: {hours} ساعة"
-        )
-
-        if minutes:
-            text += (
-                f" و{minutes} دقيقة"
-            )
-
+    elif days == 2:
+        text = "متبقي: يومين"
+    elif days <= 10:
+        text = f"متبقي: {days} أيام"
     else:
-
-        text = (
-            f"متبقي: {max(minutes, 1)} دقيقة"
-        )
+        text = f"متبقي: {days} يوم"
 
     return (
         text,
@@ -1532,7 +1593,8 @@ def get_game_keyboard(
     active,
     show_back=False,
     has_discount=False,
-    is_favorite=False
+    is_favorite=False,
+    is_dlc=False
 ):
 
     buttons = [
@@ -1560,8 +1622,8 @@ def get_game_keyboard(
         ]
     ]
 
-    # زر التنبيه يظهر فقط إذا اللعبة غير مخفضة.
-    if not has_discount:
+    # زر التنبيه يظهر فقط للعبة الأساسية غير المخفضة.
+    if not has_discount and not is_dlc:
 
         if active:
 
@@ -1671,9 +1733,7 @@ def create_game_result(
             ) = remaining
 
             expiry_text = (
-                f"\n⏳ <b>ينتهي التخفيض:</b> "
-                f"{date_text} الساعة {time_text}\n"
-                f"📅 <b>{remaining_text}</b>\n"
+                f"\n📅 <b>{remaining_text}</b>\n"
             )
 
     price_text = format_store_price(
@@ -1689,8 +1749,6 @@ def create_game_result(
         message = (
             f"🎮 <b>{display_game_name}</b>\n\n"
             "🔥 <b>اللعبة عليها تخفيض!</b>\n\n"
-            f"📉 نسبة الخصم: "
-            f"<b>{discount_percent}%</b>\n"
             f"{expiry_text}\n"
             f"💰 سعر اللعبة: "
             f"<b>{price_text}</b> 🇮🇶"
@@ -1715,10 +1773,29 @@ def create_game_result(
         favorite_exists(
             user.id,
             product_id
-        )
+        ),
+        is_dlc=is_dlc_or_addon(game_name)
     )
 
     return message, keyboard
+
+
+async def lira_calculator_start(update, context):
+
+    query = update.callback_query
+    await query.answer()
+    context.user_data["waiting_lira_amount"] = True
+
+    await query.edit_message_text(
+        "💱 <b>حاسبة الليرات التركية</b>\n\n"
+        "أرسل عدد الليرات فقط، مثال:\n"
+        "<code>500</code>\n\n"
+        "وأحسبها لك بسعر SA STORE 🇮🇶",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏠 الرئيسية", callback_data="home")]
+        ])
+    )
 
 
 # =========================================================
@@ -1734,15 +1811,24 @@ async def start(
 
         keyboard = None
 
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "💱 حاسبة الليرات",
+                    callback_data="lira_calc"
+                )
+            ]
+        ]
+
         if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🧾 سجل الطلبات",
-                        callback_data="adminorders"
-                    )
-                ]
+            buttons.append([
+                InlineKeyboardButton(
+                    "🧾 سجل الطلبات",
+                    callback_data="adminorders"
+                )
             ])
+
+        keyboard = InlineKeyboardMarkup(buttons)
 
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
@@ -1839,6 +1925,43 @@ async def handle_message(
         return
 
     text = update.message.text.strip()
+
+    if context.user_data.get("waiting_lira_amount"):
+
+        raw = text.replace(",", ".").strip()
+
+        try:
+            amount = float(raw)
+        except Exception:
+            await update.message.reply_text(
+                "❌ ارسل رقم الليرات فقط، مثال: 500"
+            )
+            return
+
+        if amount <= 0:
+            await update.message.reply_text(
+                "❌ لازم المبلغ يكون أكبر من صفر."
+            )
+            return
+
+        if amount > 1000000:
+            await update.message.reply_text(
+                "❌ المبلغ كبير جداً."
+            )
+            return
+
+        context.user_data["waiting_lira_amount"] = False
+
+        price = calculate_price(amount)
+        await update.message.reply_text(
+            f"💱 <b>{amount:g} ليرة تركية</b>\n\n"
+            f"🇮🇶 سعر SA STORE: <b>{format_store_price(price)}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💱 حاسبة ثانية", callback_data="lira_calc")]
+            ])
+        )
+        return
 
     if len(text) < 2:
         return
@@ -2263,7 +2386,7 @@ async def alert_loop(
             )
 
         await asyncio.sleep(
-            3600
+            172800
         )
 
 
@@ -2282,6 +2405,21 @@ async def button_handler(
         return
 
     data = query.data or ""
+
+    if data == "lira_calc":
+        await lira_calculator_start(update, context)
+        return
+
+    if data == "home":
+        await query.answer()
+        context.user_data["waiting_lira_amount"] = False
+        await query.edit_message_text(
+            "🎮 أرسل رابط لعبة من Xbox Store\nأو اكتب اسم اللعبة 🔍",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💱 حاسبة الليرات", callback_data="lira_calc")]
+            ])
+        )
+        return
 
     user = query.from_user
     user_id = user.id
