@@ -3129,46 +3129,79 @@ async def button_handler(
         return
 
     # =====================================================
-    # الطلب
+    # بدء الطلب: عرض تأكيد قبل تسجيله وإرساله للأدمن
     # =====================================================
 
-    if data.startswith(
-        "order:"
-    ):
+    if data.startswith("order:"):
 
-        product_id = data.split(
-            ":",
-            1
-        )[1]
+        product_id = data.split(":", 1)[1].upper()
+        last_request = get_last_request(user_id, product_id)
 
-        last_request = get_last_request(
-            user_id,
-            product_id
+        if not last_request:
+            await query.answer(
+                "ما لكيت معلومات اللعبة. ابحث عنها مرة ثانية.",
+                show_alert=True
+            )
+            return
+
+        game_name, game_url, current_price = last_request
+        context.user_data["pending_order"] = {
+            "product_id": product_id,
+            "game_name": game_name,
+            "price": current_price,
+        }
+
+        price_text = (
+            format_store_price(current_price)
+            if current_price is not None
+            else "غير متوفر"
         )
 
-        game_name = "لعبة Xbox"
-        current_price = None
+        confirm_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "✅ تأكيد الطلب",
+                    callback_data=f"confirmorder:{product_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ إلغاء",
+                    callback_data=f"cancelorder:{product_id}"
+                )
+            ]
+        ])
 
-        if last_request:
+        await query.answer()
+        await query.message.reply_text(
+            "🛒 <b>تأكيد طلب الشراء</b>\n\n"
+            f"🎮 اللعبة: <b>{game_name}</b>\n"
+            f"💰 السعر: <b>{price_text}</b> 🇮🇶\n\n"
+            "تأكد من اسم اللعبة والسعر، وبعدها اضغط «تأكيد الطلب».",
+            parse_mode="HTML",
+            reply_markup=confirm_keyboard
+        )
+        return
 
-            (
-                game_name,
-                game_url,
-                current_price
-            ) = last_request
+    # =====================================================
+    # تأكيد الطلب: يسجّل الطلب ويرسله للأدمن بعد موافقة الزبون
+    # =====================================================
 
-        if user.username:
+    if data.startswith("confirmorder:"):
 
-            customer_name = (
-                f"@{user.username}"
+        product_id = data.split(":", 1)[1].upper()
+        pending = context.user_data.get("pending_order")
+
+        if not pending or pending.get("product_id") != product_id:
+            await query.answer(
+                "انتهت صلاحية التأكيد. اضغط «اطلب الآن» من جديد.",
+                show_alert=True
             )
+            return
 
-        else:
-
-            customer_name = (
-                user.full_name
-                or "بدون اسم"
-            )
+        game_name = pending.get("game_name") or "لعبة Xbox"
+        current_price = pending.get("price")
+        customer_name = f"@{user.username}" if user.username else (user.full_name or "بدون اسم")
 
         save_order(
             user_id,
@@ -3178,68 +3211,59 @@ async def button_handler(
             current_price
         )
 
-        price_text = ""
-
-        if current_price is not None:
-
-            price_text = (
-                f"\n💰 السعر: "
-                f"<b>{format_store_price(current_price)}</b> 🇮🇶"
-            )
+        price_text = (
+            f"\n💰 السعر: <b>{format_store_price(current_price)}</b> 🇮🇶"
+            if current_price is not None
+            else "\n💰 السعر: <b>غير متوفر</b>"
+        )
 
         admin_message = (
-            "🛒 <b>طلب جديد!</b>\n\n"
+            "🛒 <b>طلب شراء مؤكّد!</b>\n\n"
             f"🎮 اللعبة: <b>{game_name}</b>\n"
             f"👤 الزبون: <b>{customer_name}</b>\n"
             f"🆔 ID: <code>{user_id}</code>"
             f"{price_text}"
         )
 
+        admin_sent = False
         if ADMIN_CHAT_ID:
-
             try:
-
                 await context.bot.send_message(
-                    chat_id=int(
-                        ADMIN_CHAT_ID
-                    ),
+                    chat_id=int(ADMIN_CHAT_ID),
                     text=admin_message,
                     parse_mode="HTML"
                 )
-
+                admin_sent = True
             except Exception as error:
+                print("ADMIN ERROR:", repr(error))
 
-                print(
-                    "ADMIN ERROR:",
-                    repr(error)
-                )
-
+        context.user_data.pop("pending_order", None)
         customer_keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "💬 تواصل مع @Sijadsa",
-                    url=ORDER_URL
-                )
-            ]
+            [InlineKeyboardButton("💬 تواصل مع @Sijadsa", url=ORDER_URL)]
         ])
 
-        await query.answer(
-            "🛒 تم تسجيل طلبك!",
-            show_alert=True
-        )
-
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=(
-                "🛒 <b>تم تسجيل طلبك</b>\n\n"
-                f"🎮 {game_name}\n\n"
-                "تقدر تتواصل ويا صاحب المتجر "
-                "لإكمال الطلب."
-            ),
+        await query.answer("✅ تم تأكيد الطلب")
+        await query.edit_message_text(
+            "✅ <b>تم تأكيد طلبك</b>\n\n"
+            f"🎮 اللعبة: <b>{game_name}</b>\n"
+            f"💰 السعر: <b>{format_store_price(current_price) if current_price is not None else 'غير متوفر'}</b> 🇮🇶\n\n"
+            + ("وصل طلبك للمتجر، وتكدر تتواصل ويانا لإكمال الشراء." if admin_sent else "تم تسجيل الطلب، لكن تعذّر إرساله للمتجر حالياً. تواصل ويانا لإكمال الشراء."),
             parse_mode="HTML",
             reply_markup=customer_keyboard
         )
+        return
 
+    # =====================================================
+    # إلغاء الطلب قبل التأكيد
+    # =====================================================
+
+    if data.startswith("cancelorder:"):
+        product_id = data.split(":", 1)[1].upper()
+        pending = context.user_data.get("pending_order")
+        if pending and pending.get("product_id") == product_id:
+            context.user_data.pop("pending_order", None)
+        await query.answer("تم إلغاء الطلب")
+        await query.edit_message_text("❌ تم إلغاء طلب الشراء. ما تم إرسال أي طلب للمتجر.")
         return
 
 
