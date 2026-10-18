@@ -396,15 +396,42 @@ def get_game_name(product):
     return "لعبة Xbox"
 
 
+def get_arabic_inspection_product(product_id):
+    """Fetch Arabic-localized metadata only; never accept a Turkish fallback."""
+    url = "https://displaycatalog.mp.microsoft.com/v7.0/products"
+    # Try Arabic locales explicitly. The API may still return a fallback locale,
+    # so the report validates Arabic text before showing a description.
+    for market, language in (("SA", "ar-SA"), ("AE", "ar-AE"), ("EG", "ar-EG"), ("US", "ar")):
+        params = {
+            "bigIds": product_id,
+            "market": market,
+            "languages": language,
+            "fieldsTemplate": "Details",
+            "actionFilter": "Browse",
+        }
+        response = SESSION.get(url, params=params, timeout=25)
+        response.raise_for_status()
+        data = response.json()
+        products = data.get("Products") or []
+        product = products[0] if products else data.get("Product")
+        if product:
+            return product
+    raise Exception("لم يعثر كتالوج Microsoft على بيانات اللعبة")
+
+
 def get_game_inspection(product):
-    """Extract only game facts actually present in Microsoft catalog metadata."""
+    """Extract catalog facts and reject non-Arabic descriptions/translated fields."""
     localized_items = product.get("LocalizedProperties") or []
-    localized = localized_items[0] if localized_items and isinstance(localized_items[0], dict) else {}
     properties = product.get("Properties") or {}
     if not isinstance(properties, dict):
         properties = {}
 
+    def is_arabic(value):
+        return bool(value and re.search(r"[\u0600-\u06ff]", str(value)))
+
     def first_value(mapping, keys):
+        if not isinstance(mapping, dict):
+            return None
         for key in keys:
             value = mapping.get(key)
             if isinstance(value, (str, int, float)) and str(value).strip():
@@ -431,30 +458,49 @@ def get_game_inspection(product):
                     return found
         return None
 
-    description = first_value(localized, ("ProductDescription", "ShortDescription", "ProductSummary"))
-    if not description:
-        description = first_value(properties, ("ProductDescription", "ShortDescription", "ProductSummary"))
+    # Prefer a localized entry that actually contains Arabic text.
+    arabic_localized = next(
+        (item for item in localized_items if isinstance(item, dict) and any(
+            is_arabic(item.get(key)) for key in ("ProductDescription", "ShortDescription", "ProductSummary")
+        )),
+        next((item for item in localized_items if isinstance(item, dict) and any(
+            is_arabic(item.get(key)) for key in ("DeveloperName", "PublisherName")
+        )), {})
+    )
 
-    developer = first_value(localized, ("DeveloperName", "Developer")) or first_value(properties, ("DeveloperName", "Developer"))
-    publisher = first_value(localized, ("PublisherName", "Publisher")) or first_value(properties, ("PublisherName", "Publisher"))
-    platforms = first_value(properties, ("SupportedPlatforms", "Platforms", "XboxConsoleGenCompatible", "Platform"))
-    languages = first_value(localized, ("SupportedLanguages", "Languages")) or first_value(properties, ("SupportedLanguages", "Languages"))
-    features = first_value(properties, ("XboxLiveFeatures", "XboxLiveCapabilities", "Features"))
-    install_size = first_value(properties, ("InstallationSize", "InstallSize", "PackageSize"))
+    description = first_value(arabic_localized, ("ProductDescription", "ShortDescription", "ProductSummary"))
+    if not is_arabic(description):
+        description = None
 
-    # Some catalog responses nest useful facts; only surface values actually returned.
-    if not developer:
-        developer = find_nested(product, {"DeveloperName", "Developer"})
-    if not publisher:
-        publisher = find_nested(product, {"PublisherName", "Publisher"})
-    if not platforms:
-        platforms = find_nested(product, {"SupportedPlatforms", "XboxConsoleGenCompatible"})
+    developer = first_value(arabic_localized, ("DeveloperName", "Developer")) or first_value(properties, ("DeveloperName", "Developer"))
+    publisher = first_value(arabic_localized, ("PublisherName", "Publisher")) or first_value(properties, ("PublisherName", "Publisher"))
+
+    raw_platforms = first_value(properties, ("SupportedPlatforms", "Platforms", "XboxConsoleGenCompatible", "Platform"))
+    if not raw_platforms:
+        raw_platforms = find_nested(product, {"SupportedPlatforms", "XboxConsoleGenCompatible"})
+    platforms = None
+    if raw_platforms:
+        platforms = str(raw_platforms)
+        platforms = platforms.replace("ConsoleGen8", "Xbox One")
+        platforms = platforms.replace("ConsoleGen9", "Xbox Series X|S")
+        platforms = platforms.replace("XboxOne", "Xbox One")
+        platforms = platforms.replace("XboxSeries", "Xbox Series X|S")
+        platforms = platforms.replace("Xbox One", "إكس بوكس ون")
+        platforms = platforms.replace("Xbox Series X|S", "إكس بوكس سيريس X وS")
+
+    languages = first_value(arabic_localized, ("SupportedLanguages", "Languages"))
     if not languages:
-        languages = find_nested(product, {"SupportedLanguages", "Languages"})
-    if not features:
-        features = find_nested(product, {"XboxLiveFeatures", "XboxLiveCapabilities"})
-    if not install_size:
-        install_size = find_nested(product, {"InstallationSize", "InstallSize", "PackageSize"})
+        languages = first_value(properties, ("SupportedLanguages", "Languages")) or find_nested(product, {"SupportedLanguages", "Languages"})
+    # Do not print untranslated language codes or English lists in the Arabic-only report.
+    if languages and not is_arabic(languages):
+        languages = None
+
+    features = first_value(properties, ("XboxLiveFeatures", "XboxLiveCapabilities", "Features")) or find_nested(product, {"XboxLiveFeatures", "XboxLiveCapabilities"})
+    # These catalog values are often internal English identifiers; don't expose them raw.
+    if features and not is_arabic(features):
+        features = None
+
+    install_size = first_value(properties, ("InstallationSize", "InstallSize", "PackageSize")) or find_nested(product, {"InstallationSize", "InstallSize", "PackageSize"})
 
     return {
         "description": description,
@@ -2875,27 +2921,46 @@ async def button_handler(
         await query.answer("🔍 جاري فحص بيانات اللعبة...")
 
         try:
-            product = await asyncio.to_thread(get_product_data, product_id)
-            details = get_game_inspection(product)
+            # Fetch Arabic-localized metadata separately; the Turkish price logic stays untouched.
+            try:
+                product = await asyncio.to_thread(get_arabic_inspection_product, product_id)
+                details = get_game_inspection(product)
+            except Exception:
+                # Do not fall back to Turkish text: the report must remain Arabic-only.
+                details = {"description": None, "developer": None, "publisher": None,
+                           "platforms": None, "languages": None, "features": None,
+                           "install_size": None}
 
-            def shown(value):
-                return str(value)[:700] if value else "غير متوفر ضمن بيانات المتجر المسترجعة"
+            def shown(value, fallback="غير متوفر بالعربية ضمن بيانات المتجر"):
+                if not value:
+                    return fallback
+                text = str(value).strip()
+                # Avoid showing a non-Arabic product description from a fallback locale.
+                return text[:450]
+
+            platforms = details["platforms"]
+            if platforms:
+                platforms = str(platforms)
+                platforms = platforms.replace("ConsoleGen8", "Xbox One")
+                platforms = platforms.replace("ConsoleGen9", "Xbox Series X|S")
+                platforms = platforms.replace("XboxOne", "Xbox One")
+                platforms = platforms.replace("XboxSeries", "Xbox Series X|S")
 
             price_text = format_store_price(current_price) if current_price is not None else "غير متوفر"
             report = (
-                "🔍 فاحص اللعبة قبل الشراء\n\n"
-                f"🎮 اللعبة: {game_name}\n"
-                f"💰 سعر SA STORE: {price_text} 🇮🇶\n\n"
-                f"📝 الوصف: {shown(details['description'])}\n\n"
+                "🔍 <b>فاحص اللعبة قبل الشراء</b>\n"
+                "━━━━━━━━━━━━━━\n"
+                f"🎮 <b>اللعبة:</b> {game_name}\n"
+                f"💰 <b>سعر المتجر:</b> {price_text} دينار عراقي\n\n"
+                f"📝 <b>نبذة اللعبة</b>\n{shown(details['description'], "الوصف العربي غير متوفر في بيانات المتجر.")}\n\n"
+                "📋 <b>معلومات اللعبة</b>\n"
                 f"🧑‍💻 المطوّر: {shown(details['developer'])}\n"
                 f"🏢 الناشر: {shown(details['publisher'])}\n"
-                f"🎮 الأجهزة/التوافق: {shown(details['platforms'])}\n"
-                f"🌐 اللغات: {shown(details['languages'])}\n"
-                f"👥 ميزات Xbox Live: {shown(details['features'])}\n"
-                f"💾 حجم التثبيت: {shown(details['install_size'])}\n\n"
-                "ℹ️ يعرض هذا التقرير المعلومات التي أرجعها كتالوج Microsoft فقط. "
-                "إذا كانت معلومة غير متوفرة هنا، فهذا لا يعني أن اللعبة لا تدعمها. "
-                "تحقق من صفحة اللعبة الرسمية قبل الشراء إذا كانت اللغة أو متطلبات الإنترنت مهمة لك."
+                f"🎮 الأجهزة: {shown(platforms)}\n"
+                f"🌐 اللغات: {shown(details['languages'], "لم يحدد المتجر اللغات بالعربية.")}\n"
+                f"🌐 اللعب عبر الإنترنت: {shown(details['features'], "تفاصيل اللعب عبر الإنترنت غير متوفرة بالعربية.")}\n"
+                f"💾 حجم التثبيت: {shown(details['install_size'], "حجم التثبيت غير متوفر ضمن البيانات المسترجعة.")}\n\n"
+                "ℹ️ المعلومات المعروضة هي المتوفرة في كتالوج Microsoft. عدم ظهور معلومة لا يعني أن الميزة غير مدعومة."
             )
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🛒 اطلب اللعبة", callback_data=f"order:{product_id}")],
