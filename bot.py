@@ -420,95 +420,88 @@ def get_arabic_inspection_product(product_id):
 
 
 def get_game_inspection(product):
-    """Extract catalog facts and reject non-Arabic descriptions/translated fields."""
-    localized_items = product.get("LocalizedProperties") or []
+    """Return only two customer-facing facts: Arabic language support and install size."""
     properties = product.get("Properties") or {}
     if not isinstance(properties, dict):
         properties = {}
 
-    def is_arabic(value):
-        return bool(value and re.search(r"[\u0600-\u06ff]", str(value)))
+    language_keys = {
+        "SupportedLanguages", "SupportedGameLanguages", "GameLanguages",
+        "LanguageSupport", "SupportedLanguageCodes", "LanguagesSupported"
+    }
+    size_keys = {
+        "InstallationSize", "InstallSize", "PackageSize",
+        "ApproximateSize", "ContentSize", "SizeOnDisk"
+    }
 
-    def first_value(mapping, keys):
-        if not isinstance(mapping, dict):
-            return None
-        for key in keys:
-            value = mapping.get(key)
-            if isinstance(value, (str, int, float)) and str(value).strip():
-                return str(value).strip()
-            if isinstance(value, list):
-                values = [str(x).strip() for x in value if isinstance(x, (str, int, float)) and str(x).strip()]
-                if values:
-                    return ", ".join(values[:8])
-        return None
+    def collect_values(node, wanted_keys, found):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in wanted_keys and value not in (None, "", [], {}):
+                    found.append(value)
+                # Don't treat the store page's interface locale as game language support.
+                if key == "LocalizedProperties":
+                    continue
+                collect_values(value, wanted_keys, found)
+        elif isinstance(node, list):
+            for value in node:
+                collect_values(value, wanted_keys, found)
 
-    def find_nested(mapping, wanted_keys):
-        if isinstance(mapping, dict):
-            for key, value in mapping.items():
-                if key in wanted_keys and isinstance(value, (str, int, float)) and str(value).strip():
-                    return str(value).strip()
-            for value in mapping.values():
-                found = find_nested(value, wanted_keys)
-                if found:
-                    return found
-        elif isinstance(mapping, list):
-            for value in mapping:
-                found = find_nested(value, wanted_keys)
-                if found:
-                    return found
-        return None
+    raw_languages = []
+    collect_values(product, language_keys, raw_languages)
 
-    # Prefer a localized entry that actually contains Arabic text.
-    arabic_localized = next(
-        (item for item in localized_items if isinstance(item, dict) and any(
-            is_arabic(item.get(key)) for key in ("ProductDescription", "ShortDescription", "ProductSummary")
-        )),
-        next((item for item in localized_items if isinstance(item, dict) and any(
-            is_arabic(item.get(key)) for key in ("DeveloperName", "PublisherName")
-        )), {})
+    def flatten(value):
+        if isinstance(value, dict):
+            return " ".join(flatten(v) for v in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return " ".join(flatten(v) for v in value)
+        return str(value)
+
+    language_blob = " ".join(flatten(value) for value in raw_languages).lower()
+    arabic_markers = (
+        "arabic", "العربية", "عربي", "ar-sa", "ar-ae", "ar-eg",
+        "ar-iq", "ar", "language.ar"
     )
+    # Match standalone language codes to avoid false positives inside other words.
+    has_arabic = (
+        "arabic" in language_blob
+        or "العربية" in language_blob
+        or "عربي" in language_blob
+        or bool(re.search(r"(?<![a-z])ar(?:-[a-z]{2})?(?![a-z])", language_blob))
+    ) if raw_languages else None
 
-    description = first_value(arabic_localized, ("ProductDescription", "ShortDescription", "ProductSummary"))
-    if not is_arabic(description):
-        description = None
+    raw_sizes = []
+    collect_values(product, size_keys, raw_sizes)
+    raw_size = raw_sizes[0] if raw_sizes else None
 
-    developer = first_value(arabic_localized, ("DeveloperName", "Developer")) or first_value(properties, ("DeveloperName", "Developer"))
-    publisher = first_value(arabic_localized, ("PublisherName", "Publisher")) or first_value(properties, ("PublisherName", "Publisher"))
+    def format_size(value):
+        if isinstance(value, dict):
+            value = value.get("Value") or value.get("Size") or value.get("value")
+        if isinstance(value, (int, float)):
+            # Catalog sizes are commonly bytes; avoid converting small already-human values.
+            if value >= 1024 ** 3:
+                return f"{value / (1024 ** 3):.2f} GB"
+            if value >= 1024 ** 2:
+                return f"{value / (1024 ** 2):.0f} MB"
+            if value >= 1000:
+                return f"{value / 1000:.2f} GB"
+            return f"{value:g} GB"
+        if isinstance(value, str):
+            text = value.strip()
+            match = re.search(r"(\d+(?:[.,]\d+)?)\s*(GB|GiB|MB|MiB|TB|TiB)", text, re.I)
+            if match:
+                number = float(match.group(1).replace(",", "."))
+                unit = match.group(2).upper()
+                factor = {"GB": 1, "GIB": 1.073741824, "MB": 1/1000, "MIB": 1/1024,
+                          "TB": 1000, "TIB": 1099.511627776}[unit]
+                return f"{number * factor:.2f} GB"
+            if text.isdigit():
+                return format_size(int(text))
+        return None
 
-    raw_platforms = first_value(properties, ("SupportedPlatforms", "Platforms", "XboxConsoleGenCompatible", "Platform"))
-    if not raw_platforms:
-        raw_platforms = find_nested(product, {"SupportedPlatforms", "XboxConsoleGenCompatible"})
-    platforms = None
-    if raw_platforms:
-        platforms = str(raw_platforms)
-        platforms = platforms.replace("ConsoleGen8", "Xbox One")
-        platforms = platforms.replace("ConsoleGen9", "Xbox Series X|S")
-        platforms = platforms.replace("XboxOne", "Xbox One")
-        platforms = platforms.replace("XboxSeries", "Xbox Series X|S")
-        platforms = platforms.replace("Xbox One", "إكس بوكس ون")
-        platforms = platforms.replace("Xbox Series X|S", "إكس بوكس سيريس X وS")
-
-    languages = first_value(arabic_localized, ("SupportedLanguages", "Languages"))
-    if not languages:
-        languages = first_value(properties, ("SupportedLanguages", "Languages")) or find_nested(product, {"SupportedLanguages", "Languages"})
-    # Do not print untranslated language codes or English lists in the Arabic-only report.
-    if languages and not is_arabic(languages):
-        languages = None
-
-    features = first_value(properties, ("XboxLiveFeatures", "XboxLiveCapabilities", "Features")) or find_nested(product, {"XboxLiveFeatures", "XboxLiveCapabilities"})
-    # These catalog values are often internal English identifiers; don't expose them raw.
-    if features and not is_arabic(features):
-        features = None
-
-    install_size = first_value(properties, ("InstallationSize", "InstallSize", "PackageSize")) or find_nested(product, {"InstallationSize", "InstallSize", "PackageSize"})
-
+    install_size = format_size(raw_size)
     return {
-        "description": description,
-        "developer": developer,
-        "publisher": publisher,
-        "platforms": platforms,
-        "languages": languages,
-        "features": features,
+        "arabic_supported": has_arabic,
         "install_size": install_size,
     }
 
@@ -2905,6 +2898,8 @@ async def button_handler(
     # =====================================================
     # فاحص اللعبة قبل الشراء
     # =====================================================
+    # فاحص اللعبة قبل الشراء - العربية والحجم فقط
+    # =====================================================
 
     if data.startswith("inspect:"):
         product_id = data.split(":", 1)[1].upper()
@@ -2918,59 +2913,42 @@ async def button_handler(
             return
 
         game_name, game_url, current_price = last_request
-        await query.answer("🔍 جاري فحص بيانات اللعبة...")
+        await query.answer("🔍 جاري فحص اللغة والحجم...")
 
         try:
-            # Fetch Arabic-localized metadata separately; the Turkish price logic stays untouched.
-            try:
-                product = await asyncio.to_thread(get_arabic_inspection_product, product_id)
-                details = get_game_inspection(product)
-            except Exception:
-                # Do not fall back to Turkish text: the report must remain Arabic-only.
-                details = {"description": None, "developer": None, "publisher": None,
-                           "platforms": None, "languages": None, "features": None,
-                           "install_size": None}
-
-            def shown(value, fallback="غير متوفر بالعربية ضمن بيانات المتجر"):
-                if not value:
-                    return fallback
-                text = str(value).strip()
-                # Avoid showing a non-Arabic product description from a fallback locale.
-                return text[:450]
-
-            platforms = details["platforms"]
-            if platforms:
-                platforms = str(platforms)
-                platforms = platforms.replace("ConsoleGen8", "Xbox One")
-                platforms = platforms.replace("ConsoleGen9", "Xbox Series X|S")
-                platforms = platforms.replace("XboxOne", "Xbox One")
-                platforms = platforms.replace("XboxSeries", "Xbox Series X|S")
-
-            price_text = format_store_price(current_price) if current_price is not None else "غير متوفر"
-            report = (
-                "🔍 <b>فاحص اللعبة قبل الشراء</b>\n"
-                "━━━━━━━━━━━━━━\n"
-                f"🎮 <b>اللعبة:</b> {game_name}\n"
-                f"💰 <b>سعر المتجر:</b> {price_text} دينار عراقي\n\n"
-                f"📝 <b>نبذة اللعبة</b>\n{shown(details['description'], "الوصف العربي غير متوفر في بيانات المتجر.")}\n\n"
-                "📋 <b>معلومات اللعبة</b>\n"
-                f"🧑‍💻 المطوّر: {shown(details['developer'])}\n"
-                f"🏢 الناشر: {shown(details['publisher'])}\n"
-                f"🎮 الأجهزة: {shown(platforms)}\n"
-                f"🌐 اللغات: {shown(details['languages'], "لم يحدد المتجر اللغات بالعربية.")}\n"
-                f"🌐 اللعب عبر الإنترنت: {shown(details['features'], "تفاصيل اللعب عبر الإنترنت غير متوفرة بالعربية.")}\n"
-                f"💾 حجم التثبيت: {shown(details['install_size'], "حجم التثبيت غير متوفر ضمن البيانات المسترجعة.")}\n\n"
-                "ℹ️ المعلومات المعروضة هي المتوفرة في كتالوج Microsoft. عدم ظهور معلومة لا يعني أن الميزة غير مدعومة."
+            product = await asyncio.to_thread(
+                get_arabic_inspection_product, product_id
             )
+            details = get_game_inspection(product)
+
+            if details["arabic_supported"] is True:
+                arabic_text = "✅ تدعم اللغة العربية"
+            elif details["arabic_supported"] is False:
+                arabic_text = "❌ لا تدعم اللغة العربية"
+            else:
+                arabic_text = "⚪ دعم العربية غير مؤكد من بيانات المتجر"
+
+            size_text = details["install_size"] or "غير متوفر ضمن بيانات المتجر"
+
+            report = (
+                "🔍 فحص اللعبة\n"
+                "━━━━━━━━━━━━━━\n"
+                f"🌐 اللغة العربية: {arabic_text}\n"
+                f"💾 حجم اللعبة: {size_text}"
+            )
+
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🛒 اطلب اللعبة", callback_data=f"order:{product_id}")],
                 [InlineKeyboardButton("🔙 الرجوع للسعر", callback_data=f"inspectback:{product_id}")]
             ])
-            await query.message.reply_text(report, reply_markup=keyboard)
+            await query.message.reply_text(
+                report,
+                reply_markup=keyboard
+            )
         except Exception as error:
             print("GAME INSPECTION ERROR:", product_id, repr(error))
             await query.message.reply_text(
-                "❌ ما كدرت أجيب بيانات الفحص حالياً. السعر الأصلي ما متأثر؛ جرّب مرة ثانية لاحقاً.",
+                "❌ ما كدرت أجيب معلومات اللغة والحجم حالياً. جرّب مرة ثانية لاحقاً.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 إعادة الفحص", callback_data=f"inspect:{product_id}")]
                 ])
