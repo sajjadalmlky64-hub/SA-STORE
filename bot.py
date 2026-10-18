@@ -542,17 +542,28 @@ def _arabic_support_from_xbox_html(source):
 
 def get_game_inspection(product, official_url=None):
     """Return install size only; do not infer a size from unrelated numeric fields."""
-    size_keys = {
-        "InstallationSize", "InstallSize", "PackageSize",
-        "ApproximateSize", "ContentSize", "SizeOnDisk",
-        "InstallSizeInBytes", "InstallationSizeInBytes",
+    # Microsoft has returned size metadata under different casing/names across
+    # catalog payload versions. Match only size-related installation/package
+    # fields, case-insensitively; do not treat arbitrary fields like image sizes
+    # or screen dimensions as a game's install size.
+    size_key_names = {
+        "installationsize", "installsize", "packagesize",
+        "approximatesize", "contentsize", "sizeondisk",
+        "installsizeinbytes", "installationsizeinbytes",
+        "approximatesizeinbytes", "packagesizeinbytes",
+        "contentsizeinbytes", "downloadsize", "downloadsizeinbytes",
+        "xboxinstallsize", "xboxinstallsizeinbytes",
     }
+
+    def normalize_key(key):
+        return re.sub(r"[^a-z]", "", str(key).lower())
 
     def collect_values(node, wanted_keys, found):
         if isinstance(node, dict):
             for key, value in node.items():
-                if key in wanted_keys and value not in (None, "", [], {}):
-                    found.append(value)
+                normalized_key = normalize_key(key)
+                if normalized_key in wanted_keys and value not in (None, "", [], {}):
+                    found.append((value, str(key)))
                 collect_values(value, wanted_keys, found)
         elif isinstance(node, list):
             for value in node:
@@ -591,13 +602,10 @@ def get_game_inspection(product, official_url=None):
         return None
 
     raw_sizes = []
-    collect_values(product, size_keys, raw_sizes)
+    collect_values(product, size_key_names, raw_sizes)
     install_size = None
-    for raw_size in raw_sizes:
-        install_size = format_size(raw_size)
-        if not install_size:
-            # If the field name itself indicates bytes, handle numeric values as bytes.
-            install_size = format_size(raw_size, "InstallationSizeInBytes")
+    for raw_size, key_hint in raw_sizes:
+        install_size = format_size(raw_size, key_hint)
         if install_size:
             break
 
@@ -605,8 +613,8 @@ def get_game_inspection(product, official_url=None):
     if not install_size and official_html:
         # Search raw HTML/embedded JSON first, since the visible page is often hydrated by JS.
         raw_patterns = (
-            r'(?i)(?:approximate\s*size|installation\s*size|install\s*size|size\s*on\s*disk|الحجم\s*التقريبي|حجم\s*التثبيت)[^\w]{0,100}(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))',
-            r'(?i)(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))[^<>]{0,100}(?:approximate\s*size|installation\s*size|install\s*size|size\s*on\s*disk|الحجم\s*التقريبي|حجم\s*التثبيت)',
+            r'(?i)(?:approximate\s*size|installation\s*size|install\s*size|size\s*on\s*disk|yaklaşık\s*boyut|yaklasik\s*boyut|yükleme\s*boyutu|yukleme\s*boyutu|kurulum\s*boyutu|الحجم\s*التقريبي|حجم\s*التثبيت)[^\w]{0,100}(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))',
+            r'(?i)(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))[^<>]{0,100}(?:approximate\s*size|installation\s*size|install\s*size|size\s*on\s*disk|yaklaşık\s*boyut|yaklasik\s*boyut|yükleme\s*boyutu|yukleme\s*boyutu|kurulum\s*boyutu|الحجم\s*التقريبي|حجم\s*التثبيت)',
         )
         for pattern in raw_patterns:
             match = re.search(pattern, official_html)
@@ -616,11 +624,30 @@ def get_game_inspection(product, official_url=None):
                     break
 
         if not install_size:
+            # Some Xbox page builds serialize the approximate size as a numeric
+            # byte count in JSON rather than displaying a localized label in HTML.
+            json_size_patterns = (
+                r'(?i)["\'](?:approximateSize|approximateSizeInBytes|installationSize|installationSizeInBytes|installSize|installSizeInBytes|downloadSize|downloadSizeInBytes|sizeOnDisk)["\']\s*:\s*["\']?(\d+(?:\.\d+)?)["\']?',
+            )
+            for pattern in json_size_patterns:
+                for match in re.finditer(pattern, official_html):
+                    try:
+                        numeric_size = float(match.group(1))
+                    except (TypeError, ValueError):
+                        continue
+                    if numeric_size >= 1024 ** 3:
+                        install_size = format_size(numeric_size, "InstallationSizeInBytes")
+                        if install_size:
+                            break
+                if install_size:
+                    break
+
+        if not install_size:
             page_text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", official_html)
             page_text = re.sub(r"(?s)<[^>]+>", " ", page_text)
             page_text = re.sub(r"\s+", " ", html_lib.unescape(page_text))
             text_patterns = (
-                r"(?:الحجم التقريبي|حجم التثبيت|حجم اللعبة|Approximate size|Installation size|Install size|Size on disk)\s*[:：]?\s*(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))",
+                r"(?:الحجم التقريبي|حجم التثبيت|حجم اللعبة|Yaklaşık boyut|Yaklasik boyut|Yükleme boyutu|Yukleme boyutu|Kurulum boyutu|Approximate size|Installation size|Install size|Size on disk)\s*[:：]?\s*(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))",
                 r"(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))\s*(?:الحجم التقريبي|حجم التثبيت|Approximate size|Installation size|Install size|Size on disk)",
             )
             for pattern in text_patterns:
