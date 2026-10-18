@@ -396,6 +396,77 @@ def get_game_name(product):
     return "لعبة Xbox"
 
 
+def get_game_inspection(product):
+    """Extract only game facts actually present in Microsoft catalog metadata."""
+    localized_items = product.get("LocalizedProperties") or []
+    localized = localized_items[0] if localized_items and isinstance(localized_items[0], dict) else {}
+    properties = product.get("Properties") or {}
+    if not isinstance(properties, dict):
+        properties = {}
+
+    def first_value(mapping, keys):
+        for key in keys:
+            value = mapping.get(key)
+            if isinstance(value, (str, int, float)) and str(value).strip():
+                return str(value).strip()
+            if isinstance(value, list):
+                values = [str(x).strip() for x in value if isinstance(x, (str, int, float)) and str(x).strip()]
+                if values:
+                    return ", ".join(values[:8])
+        return None
+
+    def find_nested(mapping, wanted_keys):
+        if isinstance(mapping, dict):
+            for key, value in mapping.items():
+                if key in wanted_keys and isinstance(value, (str, int, float)) and str(value).strip():
+                    return str(value).strip()
+            for value in mapping.values():
+                found = find_nested(value, wanted_keys)
+                if found:
+                    return found
+        elif isinstance(mapping, list):
+            for value in mapping:
+                found = find_nested(value, wanted_keys)
+                if found:
+                    return found
+        return None
+
+    description = first_value(localized, ("ProductDescription", "ShortDescription", "ProductSummary"))
+    if not description:
+        description = first_value(properties, ("ProductDescription", "ShortDescription", "ProductSummary"))
+
+    developer = first_value(localized, ("DeveloperName", "Developer")) or first_value(properties, ("DeveloperName", "Developer"))
+    publisher = first_value(localized, ("PublisherName", "Publisher")) or first_value(properties, ("PublisherName", "Publisher"))
+    platforms = first_value(properties, ("SupportedPlatforms", "Platforms", "XboxConsoleGenCompatible", "Platform"))
+    languages = first_value(localized, ("SupportedLanguages", "Languages")) or first_value(properties, ("SupportedLanguages", "Languages"))
+    features = first_value(properties, ("XboxLiveFeatures", "XboxLiveCapabilities", "Features"))
+    install_size = first_value(properties, ("InstallationSize", "InstallSize", "PackageSize"))
+
+    # Some catalog responses nest useful facts; only surface values actually returned.
+    if not developer:
+        developer = find_nested(product, {"DeveloperName", "Developer"})
+    if not publisher:
+        publisher = find_nested(product, {"PublisherName", "Publisher"})
+    if not platforms:
+        platforms = find_nested(product, {"SupportedPlatforms", "XboxConsoleGenCompatible"})
+    if not languages:
+        languages = find_nested(product, {"SupportedLanguages", "Languages"})
+    if not features:
+        features = find_nested(product, {"XboxLiveFeatures", "XboxLiveCapabilities"})
+    if not install_size:
+        install_size = find_nested(product, {"InstallationSize", "InstallSize", "PackageSize"})
+
+    return {
+        "description": description,
+        "developer": developer,
+        "publisher": publisher,
+        "platforms": platforms,
+        "languages": languages,
+        "features": features,
+        "install_size": install_size,
+    }
+
+
 # =========================================================
 # استخراج الأسعار
 # =========================================================
@@ -1647,6 +1718,12 @@ def get_game_keyboard(
     buttons = [
         [
             InlineKeyboardButton(
+                "🔍 فحص اللعبة قبل الشراء",
+                callback_data=f"inspect:{product_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 "🛒 اطلب الآن",
                 callback_data=f"order:{product_id}"
             )
@@ -2777,6 +2854,86 @@ async def button_handler(
             )
         )
 
+        return
+
+    # =====================================================
+    # فاحص اللعبة قبل الشراء
+    # =====================================================
+
+    if data.startswith("inspect:"):
+        product_id = data.split(":", 1)[1].upper()
+        last_request = get_last_request(user_id, product_id)
+
+        if not last_request:
+            await query.answer(
+                "❌ معلومات اللعبة غير متوفرة، ابحث عنها مرة ثانية.",
+                show_alert=True
+            )
+            return
+
+        game_name, game_url, current_price = last_request
+        await query.answer("🔍 جاري فحص بيانات اللعبة...")
+
+        try:
+            product = await asyncio.to_thread(get_product_data, product_id)
+            details = get_game_inspection(product)
+
+            def shown(value):
+                return str(value)[:700] if value else "غير متوفر ضمن بيانات المتجر المسترجعة"
+
+            price_text = format_store_price(current_price) if current_price is not None else "غير متوفر"
+            report = (
+                "🔍 فاحص اللعبة قبل الشراء\n\n"
+                f"🎮 اللعبة: {game_name}\n"
+                f"💰 سعر SA STORE: {price_text} 🇮🇶\n\n"
+                f"📝 الوصف: {shown(details['description'])}\n\n"
+                f"🧑‍💻 المطوّر: {shown(details['developer'])}\n"
+                f"🏢 الناشر: {shown(details['publisher'])}\n"
+                f"🎮 الأجهزة/التوافق: {shown(details['platforms'])}\n"
+                f"🌐 اللغات: {shown(details['languages'])}\n"
+                f"👥 ميزات Xbox Live: {shown(details['features'])}\n"
+                f"💾 حجم التثبيت: {shown(details['install_size'])}\n\n"
+                "ℹ️ يعرض هذا التقرير المعلومات التي أرجعها كتالوج Microsoft فقط. "
+                "إذا كانت معلومة غير متوفرة هنا، فهذا لا يعني أن اللعبة لا تدعمها. "
+                "تحقق من صفحة اللعبة الرسمية قبل الشراء إذا كانت اللغة أو متطلبات الإنترنت مهمة لك."
+            )
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛒 اطلب اللعبة", callback_data=f"order:{product_id}")],
+                [InlineKeyboardButton("🔙 الرجوع للسعر", callback_data=f"inspectback:{product_id}")]
+            ])
+            await query.message.reply_text(report, reply_markup=keyboard)
+        except Exception as error:
+            print("GAME INSPECTION ERROR:", product_id, repr(error))
+            await query.message.reply_text(
+                "❌ ما كدرت أجيب بيانات الفحص حالياً. السعر الأصلي ما متأثر؛ جرّب مرة ثانية لاحقاً.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 إعادة الفحص", callback_data=f"inspect:{product_id}")]
+                ])
+            )
+        return
+
+    if data.startswith("inspectback:"):
+        product_id = data.split(":", 1)[1].upper()
+        last_request = get_last_request(user_id, product_id)
+        if not last_request:
+            await query.answer("ابحث عن اللعبة مرة ثانية", show_alert=True)
+            return
+        game_name, reference, current_price = last_request
+        try:
+            if reference.startswith("xboxid:"):
+                info = await asyncio.to_thread(get_game_info_by_product_id, product_id)
+            else:
+                info = await asyncio.to_thread(get_game_info, reference)
+            resolved_id, resolved_name, turkey_price, original_price, end_date = info
+            message, keyboard = create_game_result(
+                query, resolved_id, resolved_name, turkey_price, original_price,
+                end_date, reference, show_back=user_id in SEARCH_SELECTIONS
+            )
+            await query.answer()
+            await query.message.reply_text(message, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as error:
+            print("INSPECTION BACK ERROR:", product_id, repr(error))
+            await query.answer("تعذر تحديث السعر حالياً", show_alert=True)
         return
 
     # =====================================================
