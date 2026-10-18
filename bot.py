@@ -425,9 +425,12 @@ def get_game_inspection(product):
     if not isinstance(properties, dict):
         properties = {}
 
+    # Only inspect fields that explicitly describe the game's supported languages.
+    # Generic language/locale fields can describe the store page language and cause
+    # false positives (e.g. an Arabic-localized store page for a game without Arabic).
     language_keys = {
-        "SupportedLanguages", "SupportedGameLanguages", "GameLanguages",
-        "LanguageSupport", "SupportedLanguageCodes", "LanguagesSupported"
+        "SupportedGameLanguages", "GameLanguages", "SupportedLanguages",
+        "SupportedLanguageCodes", "LanguagesSupported"
     }
     size_keys = {
         "InstallationSize", "InstallSize", "PackageSize",
@@ -457,18 +460,43 @@ def get_game_inspection(product):
             return " ".join(flatten(v) for v in value)
         return str(value)
 
-    language_blob = " ".join(flatten(value) for value in raw_languages).lower()
-    arabic_markers = (
-        "arabic", "العربية", "عربي", "ar-sa", "ar-ae", "ar-eg",
-        "ar-iq", "ar", "language.ar"
-    )
-    # Match standalone language codes to avoid false positives inside other words.
-    has_arabic = (
-        "arabic" in language_blob
-        or "العربية" in language_blob
-        or "عربي" in language_blob
-        or bool(re.search(r"(?<![a-z])ar(?:-[a-z]{2})?(?![a-z])", language_blob))
-    ) if raw_languages else None
+    def language_entries(value):
+        """Extract actual language labels/codes, not arbitrary metadata text."""
+        if isinstance(value, dict):
+            result = []
+            for key, nested in value.items():
+                # Ignore flags/locale metadata that are not language names/codes.
+                if str(key).lower() in {"name", "language", "languagecode", "code", "locale"}:
+                    result.extend(language_entries(nested))
+                elif isinstance(nested, (list, tuple, set, dict)):
+                    result.extend(language_entries(nested))
+            return result
+        if isinstance(value, (list, tuple, set)):
+            result = []
+            for nested in value:
+                result.extend(language_entries(nested))
+            return result
+        if isinstance(value, str):
+            return [value.strip()]
+        return []
+
+    entries = [entry for raw in raw_languages for entry in language_entries(raw) if entry]
+    has_arabic = None
+    if entries:
+        def is_arabic_entry(entry):
+            normalized = entry.strip().lower()
+            if "arabic" in normalized or "العربية" in normalized or "عربي" in normalized:
+                return True
+            # Accept only an explicit language-code token, not any occurrence of "ar"
+            # in free text or store-locale metadata.
+            return bool(re.fullmatch(r"ar(?:[-_](?:sa|ae|eg|iq|kw|bh|qa|om|jo|lb|ma|tn|dz|ly))?", normalized))
+
+        if any(is_arabic_entry(entry) for entry in entries):
+            has_arabic = True
+        else:
+            # A negative result is safe only when the catalog returned a concrete
+            # list of language entries; otherwise leave it unconfirmed.
+            has_arabic = False
 
     raw_sizes = []
     collect_values(product, size_keys, raw_sizes)
