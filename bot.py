@@ -541,15 +541,11 @@ def _arabic_support_from_xbox_html(source):
 
 
 def get_game_inspection(product, official_url=None):
-    """Return only Arabic support and install size; avoid locale-based false positives."""
-    # Do NOT use generic SupportedLanguages/Languages fields: these can reflect
-    # the catalog locale rather than the languages actually supported by the game.
-    explicit_language_keys = {
-        "SupportedGameLanguages", "GameLanguages", "SupportedLanguageCodes"
-    }
+    """Return install size only; do not infer a size from unrelated numeric fields."""
     size_keys = {
         "InstallationSize", "InstallSize", "PackageSize",
-        "ApproximateSize", "ContentSize", "SizeOnDisk"
+        "ApproximateSize", "ContentSize", "SizeOnDisk",
+        "InstallSizeInBytes", "InstallationSizeInBytes",
     }
 
     def collect_values(node, wanted_keys, found):
@@ -557,87 +553,84 @@ def get_game_inspection(product, official_url=None):
             for key, value in node.items():
                 if key in wanted_keys and value not in (None, "", [], {}):
                     found.append(value)
-                if key == "LocalizedProperties":
-                    continue
                 collect_values(value, wanted_keys, found)
         elif isinstance(node, list):
             for value in node:
                 collect_values(value, wanted_keys, found)
 
-    def flatten(value):
+    def format_size(value, key_hint=""):
         if isinstance(value, dict):
-            return " ".join(flatten(v) for v in value.values())
-        if isinstance(value, (list, tuple, set)):
-            return " ".join(flatten(v) for v in value)
-        return str(value)
+            # Store metadata sometimes wraps the actual value in an object.
+            for key in ("Value", "Size", "value", "size", "Amount"):
+                if value.get(key) not in (None, "", [], {}):
+                    return format_size(value[key], key_hint or key)
+            return None
 
-    raw_languages = []
-    collect_values(product, explicit_language_keys, raw_languages)
-    has_arabic = None
-    if raw_languages:
-        language_blob = " ".join(flatten(value) for value in raw_languages).strip().lower()
-        # Exact language name/code only; never match the substring "ar" in other text.
-        has_arabic = bool(
-            re.search(r"(?<![a-z])arabic(?![a-z])", language_blob)
-            or "العربية" in language_blob
-            or "عربي" in language_blob
-            or re.search(r"(?<![a-z0-9])ar(?:[-_]?(?:sa|ae|eg|iq|kw|bh|qa|om|jo|lb|ma|tn|dz|ly))?(?![a-z0-9])", language_blob)
-        )
-
-    # Official Xbox page is authoritative when it exposes the language table state.
-    official_html = _official_xbox_page(official_url)
-    page_language_result = _arabic_support_from_xbox_html(official_html)
-    if page_language_result is not None:
-        has_arabic = page_language_result
-    else:
-        # If the official page's checkbox state can't be read, don't trust ambiguous catalog fields.
-        has_arabic = None
-
-    raw_sizes = []
-    collect_values(product, size_keys, raw_sizes)
-    raw_size = raw_sizes[0] if raw_sizes else None
-
-    def format_size(value):
-        if isinstance(value, dict):
-            value = value.get("Value") or value.get("Size") or value.get("value")
         if isinstance(value, (int, float)):
-            if value >= 1024 ** 3:
+            if value <= 0:
+                return None
+            hint = key_hint.lower()
+            # Numeric byte values are converted only when the field name says bytes
+            # or the value is clearly expressed as bytes.
+            if "byte" in hint or value >= 1024 ** 3:
                 return f"{value / (1024 ** 3):.2f} GB"
             if value >= 1024 ** 2:
                 return f"{value / (1024 ** 2):.0f} MB"
-            if value >= 1000:
-                return f"{value / 1000:.2f} GB"
-            return f"{value:g} GB"
+            return None
+
         if isinstance(value, str):
-            match = re.search(r"(\d+(?:[.,]\d+)?)\s*(GB|GiB|MB|MiB|TB|TiB)", value.strip(), re.I)
+            match = re.search(r"(?<![\w.])(\d+(?:[.,]\d+)?)\s*(GB|GiB|MB|MiB|TB|TiB)(?![a-z])", value.strip(), re.I)
             if match:
                 number = float(match.group(1).replace(",", "."))
                 unit = match.group(2).upper()
-                factor = {"GB": 1, "GIB": 1.073741824, "MB": 1/1000, "MIB": 1/1024,
-                          "TB": 1000, "TIB": 1099.511627776}[unit]
+                factor = {"GB": 1, "GIB": 1.073741824, "MB": 1/1000,
+                          "MIB": 1/1024, "TB": 1000, "TIB": 1099.511627776}[unit]
                 return f"{number * factor:.2f} GB"
-            if value.strip().isdigit():
-                return format_size(int(value.strip()))
+            if value.strip().isdigit() and "byte" in key_hint.lower():
+                return format_size(int(value.strip()), key_hint)
         return None
 
-    install_size = format_size(raw_size)
+    raw_sizes = []
+    collect_values(product, size_keys, raw_sizes)
+    install_size = None
+    for raw_size in raw_sizes:
+        install_size = format_size(raw_size)
+        if not install_size:
+            # If the field name itself indicates bytes, handle numeric values as bytes.
+            install_size = format_size(raw_size, "InstallationSizeInBytes")
+        if install_size:
+            break
+
+    official_html = _official_xbox_page(official_url)
     if not install_size and official_html:
-        # Only accept sizes adjacent to an explicit size label on the official page.
-        page_text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", official_html)
-        page_text = re.sub(r"(?s)<[^>]+>", " ", page_text)
-        page_text = re.sub(r"\s+", " ", html_lib.unescape(page_text))
-        patterns = (
-            r"(?:حجم التثبيت|الحجم التقريبي|Approximate size|Installation size|Install size)\s*[:：]?\s*(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))",
-            r"(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))\s*(?:حجم التثبيت|الحجم التقريبي|Approximate size|Installation size)"
+        # Search raw HTML/embedded JSON first, since the visible page is often hydrated by JS.
+        raw_patterns = (
+            r'(?i)(?:approximate\s*size|installation\s*size|install\s*size|size\s*on\s*disk|الحجم\s*التقريبي|حجم\s*التثبيت)[^\w]{0,100}(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))',
+            r'(?i)(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))[^<>]{0,100}(?:approximate\s*size|installation\s*size|install\s*size|size\s*on\s*disk|الحجم\s*التقريبي|حجم\s*التثبيت)',
         )
-        for pattern in patterns:
-            match = re.search(pattern, page_text, re.I)
+        for pattern in raw_patterns:
+            match = re.search(pattern, official_html)
             if match:
                 install_size = format_size(match.group(1))
                 if install_size:
                     break
 
-    return {"arabic_supported": has_arabic, "install_size": install_size}
+        if not install_size:
+            page_text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", official_html)
+            page_text = re.sub(r"(?s)<[^>]+>", " ", page_text)
+            page_text = re.sub(r"\s+", " ", html_lib.unescape(page_text))
+            text_patterns = (
+                r"(?:الحجم التقريبي|حجم التثبيت|حجم اللعبة|Approximate size|Installation size|Install size|Size on disk)\s*[:：]?\s*(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))",
+                r"(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))\s*(?:الحجم التقريبي|حجم التثبيت|Approximate size|Installation size|Install size|Size on disk)",
+            )
+            for pattern in text_patterns:
+                match = re.search(pattern, page_text, re.I)
+                if match:
+                    install_size = format_size(match.group(1))
+                    if install_size:
+                        break
+
+    return {"install_size": install_size}
 
 
 # =========================================================
@@ -3047,7 +3040,7 @@ async def button_handler(
             return
 
         game_name, game_url, current_price = last_request
-        await query.answer("🔍 جاري فحص اللغة والحجم...")
+        await query.answer("🔍 جاري فحص حجم اللعبة...")
 
         try:
             product = await asyncio.to_thread(
@@ -3055,19 +3048,11 @@ async def button_handler(
             )
             details = get_game_inspection(product, game_url)
 
-            if details["arabic_supported"] is True:
-                arabic_text = "✅ تدعم اللغة العربية"
-            elif details["arabic_supported"] is False:
-                arabic_text = "❌ لا تدعم اللغة العربية"
-            else:
-                arabic_text = "⚪ دعم العربية غير مؤكد من بيانات المتجر"
-
-            size_text = details["install_size"] or "غير متوفر ضمن بيانات المتجر"
+            size_text = details["install_size"] or "غير متوفر ضمن بيانات المتجر أو الصفحة الرسمية"
 
             report = (
-                "🔍 فحص اللعبة\n"
+                "🔍 فحص حجم اللعبة\n"
                 "━━━━━━━━━━━━━━\n"
-                f"🌐 اللغة العربية: {arabic_text}\n"
                 f"💾 حجم اللعبة: {size_text}"
             )
 
