@@ -422,7 +422,7 @@ def get_arabic_inspection_product(product_id):
 
 
 class _XboxLanguageTableParser(HTMLParser):
-    """Collect likely language-table rows from the official Xbox page."""
+    """Collect the Arabic row and preserve icon markup used for language status."""
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.depth = 0
@@ -431,29 +431,44 @@ class _XboxLanguageTableParser(HTMLParser):
         self.rows = []
 
     def handle_starttag(self, tag, attrs):
-        a = {str(k).lower(): (v or "") for k, v in attrs}
-        classes = a.get("class", "").lower()
-        role = a.get("role", "").lower()
-        is_row = tag.lower() == "tr" or role == "row" or "language-row" in classes
+        attrs_dict = {str(k).lower(): (v or "") for k, v in attrs}
+        classes = attrs_dict.get("class", "").lower()
+        role = attrs_dict.get("role", "").lower()
+        is_row = (
+            tag.lower() == "tr"
+            or role == "row"
+            or "language-row" in classes
+            or "supported-language" in classes
+        )
         if is_row and self.row_depth is None:
             self.row_depth = self.depth
             self.parts = []
         if self.row_depth is not None:
-            self.parts.append("<" + tag + " " + " ".join(f'{k}="{v}"' for k, v in a.items()) + ">")
+            attrs_text = " ".join(
+                f'{key}="{html_lib.escape(str(value), quote=True)}"'
+                for key, value in attrs_dict.items()
+            )
+            self.parts.append(f"<{tag.lower()} {attrs_text}>")
         self.depth += 1
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
         self.depth = max(0, self.depth - 1)
-        if self.row_depth is not None and self.depth <= self.row_depth:
-            row = " ".join(self.parts)
-            if re.search(r"(?:\barabic\b|العربية|عربي)", row, re.I):
-                self.rows.append(row)
-            self.row_depth = None
-            self.parts = []
+        if self.row_depth is not None:
+            self.parts.append(f"</{tag.lower()}>")
+            if self.depth <= self.row_depth:
+                row = " ".join(self.parts)
+                if re.search(r"(?:\barabic\b|العربية|عربي)", row, re.I):
+                    self.rows.append(row)
+                self.row_depth = None
+                self.parts = []
 
     def handle_data(self, data):
         if self.row_depth is not None and data.strip():
-            self.parts.append(data.strip())
+            self.parts.append(html_lib.escape(data.strip()))
 
 
 def _official_xbox_page(official_url):
@@ -469,30 +484,59 @@ def _official_xbox_page(official_url):
 
 
 def _arabic_support_from_xbox_html(source):
-    """Return True/False only when the official page exposes a clear checked state."""
+    """Return a result only when the Arabic row exposes recognizable status icons."""
     if not source:
         return None
+
     parser = _XboxLanguageTableParser()
     try:
         parser.feed(source)
     except Exception:
         return None
-    if not parser.rows:
+
+    rows = parser.rows
+    # Some Xbox page versions serialize their markup inside JSON instead of normal
+    # table elements. In that case, inspect a small window around the Arabic label.
+    if not rows:
+        decoded = html_lib.unescape(source)
+        for match in re.finditer(r"(?:\barabic\b|العربية|عربي)", decoded, re.I):
+            window = decoded[max(0, match.start() - 1800):match.end() + 1800]
+            if re.search(r"(?:aria-checked|data-checked|data-state|checkmark|checkbox|<svg|<path|<circle)", window, re.I):
+                rows.append(window)
+
+    if not rows:
         return None
-    row = " ".join(parser.rows)
-    # Positive indicators must explicitly represent a checked/supported state.
-    if re.search(
-        r"(?:aria-checked=[\"']true|data-checked=[\"']true|data-state=[\"']checked|"
-        r"is-checked|checkbox-checked|icon-check|checkmark|aria-label=[\"'][^\"']*(?:checked|supported|selected)[^\"']*[\"'])",
-        row, re.I
-    ):
-        return True
-    if re.search(
-        r"(?:aria-checked=[\"']false|data-checked=[\"']false|data-state=[\"']unchecked|"
-        r"aria-label=[\"'][^\"']*(?:not checked|not supported|unchecked)[^\"']*[\"'])",
-        row, re.I
-    ):
-        return False
+
+    for row in rows:
+        # Explicit semantic states are the safest indicators.
+        if re.search(
+            r"(?:aria-checked=[\"']true|data-checked=[\"']true|"
+            r"data-state=[\"']checked|is-checked|checkbox-checked|"
+            r"icon-check|checkmark|aria-label=[\"'][^\"']*(?:checked|supported|selected)[^\"']*[\"'])",
+            row, re.I
+        ):
+            return True
+        if re.search(
+            r"(?:aria-checked=[\"']false|data-checked=[\"']false|"
+            r"data-state=[\"']unchecked|aria-label=[\"'][^\"']*(?:not checked|not supported|unchecked)[^\"']*[\"'])",
+            row, re.I
+        ):
+            return False
+
+        # The Xbox language matrix renders checked cells with a check glyph inside
+        # the circle; unchecked cells are empty circles. Count only when the row
+        # has the expected three language capability cells (audio/interface/subtitles).
+        circle_count = len(re.findall(r"<(?:circle|svg)\b", row, re.I))
+        check_glyph_count = len(re.findall(r"<(?:path|polyline)\b", row, re.I))
+        has_green_check = bool(re.search(
+            r"(?:#[0-9a-f]{3,8}\b|rgb\([^)]*\)|green)", row, re.I
+        )) and bool(re.search(r"(?:check|path|polyline|svg)", row, re.I))
+
+        if circle_count >= 3 and check_glyph_count == 0:
+            return False
+        if check_glyph_count > 0 and (circle_count >= 1 or has_green_check):
+            return True
+
     return None
 
 
