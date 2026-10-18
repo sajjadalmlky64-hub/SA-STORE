@@ -5,6 +5,8 @@ import asyncio
 import difflib
 import sqlite3
 import requests
+import html as html_lib
+from html.parser import HTMLParser
 
 from datetime import datetime, timezone
 from collections import Counter
@@ -419,18 +421,87 @@ def get_arabic_inspection_product(product_id):
     raise Exception("لم يعثر كتالوج Microsoft على بيانات اللعبة")
 
 
-def get_game_inspection(product):
-    """Return only two customer-facing facts: Arabic language support and install size."""
-    properties = product.get("Properties") or {}
-    if not isinstance(properties, dict):
-        properties = {}
+class _XboxLanguageTableParser(HTMLParser):
+    """Collect likely language-table rows from the official Xbox page."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.depth = 0
+        self.row_depth = None
+        self.parts = []
+        self.rows = []
 
-    # Only inspect fields that explicitly describe the game's supported languages.
-    # Generic language/locale fields can describe the store page language and cause
-    # false positives (e.g. an Arabic-localized store page for a game without Arabic).
-    language_keys = {
-        "SupportedGameLanguages", "GameLanguages", "SupportedLanguages",
-        "SupportedLanguageCodes", "LanguagesSupported"
+    def handle_starttag(self, tag, attrs):
+        a = {str(k).lower(): (v or "") for k, v in attrs}
+        classes = a.get("class", "").lower()
+        role = a.get("role", "").lower()
+        is_row = tag.lower() == "tr" or role == "row" or "language-row" in classes
+        if is_row and self.row_depth is None:
+            self.row_depth = self.depth
+            self.parts = []
+        if self.row_depth is not None:
+            self.parts.append("<" + tag + " " + " ".join(f'{k}="{v}"' for k, v in a.items()) + ">")
+        self.depth += 1
+
+    def handle_endtag(self, tag):
+        self.depth = max(0, self.depth - 1)
+        if self.row_depth is not None and self.depth <= self.row_depth:
+            row = " ".join(self.parts)
+            if re.search(r"(?:\barabic\b|العربية|عربي)", row, re.I):
+                self.rows.append(row)
+            self.row_depth = None
+            self.parts = []
+
+    def handle_data(self, data):
+        if self.row_depth is not None and data.strip():
+            self.parts.append(data.strip())
+
+
+def _official_xbox_page(official_url):
+    if not isinstance(official_url, str) or "xbox.com" not in official_url.lower():
+        return ""
+    try:
+        response = SESSION.get(official_url, timeout=20)
+        response.raise_for_status()
+        return html_lib.unescape(response.text)
+    except Exception as error:
+        print("OFFICIAL XBOX PAGE FETCH FAILED:", repr(error))
+        return ""
+
+
+def _arabic_support_from_xbox_html(source):
+    """Return True/False only when the official page exposes a clear checked state."""
+    if not source:
+        return None
+    parser = _XboxLanguageTableParser()
+    try:
+        parser.feed(source)
+    except Exception:
+        return None
+    if not parser.rows:
+        return None
+    row = " ".join(parser.rows)
+    # Positive indicators must explicitly represent a checked/supported state.
+    if re.search(
+        r"(?:aria-checked=[\"']true|data-checked=[\"']true|data-state=[\"']checked|"
+        r"is-checked|checkbox-checked|icon-check|checkmark|aria-label=[\"'][^\"']*(?:checked|supported|selected)[^\"']*[\"'])",
+        row, re.I
+    ):
+        return True
+    if re.search(
+        r"(?:aria-checked=[\"']false|data-checked=[\"']false|data-state=[\"']unchecked|"
+        r"aria-label=[\"'][^\"']*(?:not checked|not supported|unchecked)[^\"']*[\"'])",
+        row, re.I
+    ):
+        return False
+    return None
+
+
+def get_game_inspection(product, official_url=None):
+    """Return only Arabic support and install size; avoid locale-based false positives."""
+    # Do NOT use generic SupportedLanguages/Languages fields: these can reflect
+    # the catalog locale rather than the languages actually supported by the game.
+    explicit_language_keys = {
+        "SupportedGameLanguages", "GameLanguages", "SupportedLanguageCodes"
     }
     size_keys = {
         "InstallationSize", "InstallSize", "PackageSize",
@@ -442,16 +513,12 @@ def get_game_inspection(product):
             for key, value in node.items():
                 if key in wanted_keys and value not in (None, "", [], {}):
                     found.append(value)
-                # Don't treat the store page's interface locale as game language support.
                 if key == "LocalizedProperties":
                     continue
                 collect_values(value, wanted_keys, found)
         elif isinstance(node, list):
             for value in node:
                 collect_values(value, wanted_keys, found)
-
-    raw_languages = []
-    collect_values(product, language_keys, raw_languages)
 
     def flatten(value):
         if isinstance(value, dict):
@@ -460,43 +527,27 @@ def get_game_inspection(product):
             return " ".join(flatten(v) for v in value)
         return str(value)
 
-    def language_entries(value):
-        """Extract actual language labels/codes, not arbitrary metadata text."""
-        if isinstance(value, dict):
-            result = []
-            for key, nested in value.items():
-                # Ignore flags/locale metadata that are not language names/codes.
-                if str(key).lower() in {"name", "language", "languagecode", "code", "locale"}:
-                    result.extend(language_entries(nested))
-                elif isinstance(nested, (list, tuple, set, dict)):
-                    result.extend(language_entries(nested))
-            return result
-        if isinstance(value, (list, tuple, set)):
-            result = []
-            for nested in value:
-                result.extend(language_entries(nested))
-            return result
-        if isinstance(value, str):
-            return [value.strip()]
-        return []
-
-    entries = [entry for raw in raw_languages for entry in language_entries(raw) if entry]
+    raw_languages = []
+    collect_values(product, explicit_language_keys, raw_languages)
     has_arabic = None
-    if entries:
-        def is_arabic_entry(entry):
-            normalized = entry.strip().lower()
-            if "arabic" in normalized or "العربية" in normalized or "عربي" in normalized:
-                return True
-            # Accept only an explicit language-code token, not any occurrence of "ar"
-            # in free text or store-locale metadata.
-            return bool(re.fullmatch(r"ar(?:[-_](?:sa|ae|eg|iq|kw|bh|qa|om|jo|lb|ma|tn|dz|ly))?", normalized))
+    if raw_languages:
+        language_blob = " ".join(flatten(value) for value in raw_languages).strip().lower()
+        # Exact language name/code only; never match the substring "ar" in other text.
+        has_arabic = bool(
+            re.search(r"(?<![a-z])arabic(?![a-z])", language_blob)
+            or "العربية" in language_blob
+            or "عربي" in language_blob
+            or re.search(r"(?<![a-z0-9])ar(?:[-_]?(?:sa|ae|eg|iq|kw|bh|qa|om|jo|lb|ma|tn|dz|ly))?(?![a-z0-9])", language_blob)
+        )
 
-        if any(is_arabic_entry(entry) for entry in entries):
-            has_arabic = True
-        else:
-            # A negative result is safe only when the catalog returned a concrete
-            # list of language entries; otherwise leave it unconfirmed.
-            has_arabic = False
+    # Official Xbox page is authoritative when it exposes the language table state.
+    official_html = _official_xbox_page(official_url)
+    page_language_result = _arabic_support_from_xbox_html(official_html)
+    if page_language_result is not None:
+        has_arabic = page_language_result
+    else:
+        # If the official page's checkbox state can't be read, don't trust ambiguous catalog fields.
+        has_arabic = None
 
     raw_sizes = []
     collect_values(product, size_keys, raw_sizes)
@@ -506,7 +557,6 @@ def get_game_inspection(product):
         if isinstance(value, dict):
             value = value.get("Value") or value.get("Size") or value.get("value")
         if isinstance(value, (int, float)):
-            # Catalog sizes are commonly bytes; avoid converting small already-human values.
             if value >= 1024 ** 3:
                 return f"{value / (1024 ** 3):.2f} GB"
             if value >= 1024 ** 2:
@@ -515,23 +565,35 @@ def get_game_inspection(product):
                 return f"{value / 1000:.2f} GB"
             return f"{value:g} GB"
         if isinstance(value, str):
-            text = value.strip()
-            match = re.search(r"(\d+(?:[.,]\d+)?)\s*(GB|GiB|MB|MiB|TB|TiB)", text, re.I)
+            match = re.search(r"(\d+(?:[.,]\d+)?)\s*(GB|GiB|MB|MiB|TB|TiB)", value.strip(), re.I)
             if match:
                 number = float(match.group(1).replace(",", "."))
                 unit = match.group(2).upper()
                 factor = {"GB": 1, "GIB": 1.073741824, "MB": 1/1000, "MIB": 1/1024,
                           "TB": 1000, "TIB": 1099.511627776}[unit]
                 return f"{number * factor:.2f} GB"
-            if text.isdigit():
-                return format_size(int(text))
+            if value.strip().isdigit():
+                return format_size(int(value.strip()))
         return None
 
     install_size = format_size(raw_size)
-    return {
-        "arabic_supported": has_arabic,
-        "install_size": install_size,
-    }
+    if not install_size and official_html:
+        # Only accept sizes adjacent to an explicit size label on the official page.
+        page_text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", official_html)
+        page_text = re.sub(r"(?s)<[^>]+>", " ", page_text)
+        page_text = re.sub(r"\s+", " ", html_lib.unescape(page_text))
+        patterns = (
+            r"(?:حجم التثبيت|الحجم التقريبي|Approximate size|Installation size|Install size)\s*[:：]?\s*(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))",
+            r"(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))\s*(?:حجم التثبيت|الحجم التقريبي|Approximate size|Installation size)"
+        )
+        for pattern in patterns:
+            match = re.search(pattern, page_text, re.I)
+            if match:
+                install_size = format_size(match.group(1))
+                if install_size:
+                    break
+
+    return {"arabic_supported": has_arabic, "install_size": install_size}
 
 
 # =========================================================
@@ -2947,7 +3009,7 @@ async def button_handler(
             product = await asyncio.to_thread(
                 get_arabic_inspection_product, product_id
             )
-            details = get_game_inspection(product)
+            details = get_game_inspection(product, game_url)
 
             if details["arabic_supported"] is True:
                 arabic_text = "✅ تدعم اللغة العربية"
