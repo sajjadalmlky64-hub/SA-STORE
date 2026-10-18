@@ -5,8 +5,6 @@ import asyncio
 import difflib
 import sqlite3
 import requests
-import html as html_lib
-from html.parser import HTMLParser
 
 from datetime import datetime, timezone
 from collections import Counter
@@ -112,6 +110,18 @@ def init_database():
             current_price INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_id, product_id)
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS recent_searches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            product_id TEXT NOT NULL,
+            game_name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            current_price INTEGER NOT NULL,
+            searched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -398,270 +408,6 @@ def get_game_name(product):
     return "لعبة Xbox"
 
 
-def get_arabic_inspection_product(product_id):
-    """Fetch Arabic-localized metadata only; never accept a Turkish fallback."""
-    url = "https://displaycatalog.mp.microsoft.com/v7.0/products"
-    # Try Arabic locales explicitly. The API may still return a fallback locale,
-    # so the report validates Arabic text before showing a description.
-    for market, language in (("SA", "ar-SA"), ("AE", "ar-AE"), ("EG", "ar-EG"), ("US", "ar")):
-        params = {
-            "bigIds": product_id,
-            "market": market,
-            "languages": language,
-            "fieldsTemplate": "Details",
-            "actionFilter": "Browse",
-        }
-        response = SESSION.get(url, params=params, timeout=25)
-        response.raise_for_status()
-        data = response.json()
-        products = data.get("Products") or []
-        product = products[0] if products else data.get("Product")
-        if product:
-            return product
-    raise Exception("لم يعثر كتالوج Microsoft على بيانات اللعبة")
-
-
-class _XboxLanguageTableParser(HTMLParser):
-    """Collect the Arabic row and preserve icon markup used for language status."""
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.depth = 0
-        self.row_depth = None
-        self.parts = []
-        self.rows = []
-
-    def handle_starttag(self, tag, attrs):
-        attrs_dict = {str(k).lower(): (v or "") for k, v in attrs}
-        classes = attrs_dict.get("class", "").lower()
-        role = attrs_dict.get("role", "").lower()
-        is_row = (
-            tag.lower() == "tr"
-            or role == "row"
-            or "language-row" in classes
-            or "supported-language" in classes
-        )
-        if is_row and self.row_depth is None:
-            self.row_depth = self.depth
-            self.parts = []
-        if self.row_depth is not None:
-            attrs_text = " ".join(
-                f'{key}="{html_lib.escape(str(value), quote=True)}"'
-                for key, value in attrs_dict.items()
-            )
-            self.parts.append(f"<{tag.lower()} {attrs_text}>")
-        self.depth += 1
-
-    def handle_startendtag(self, tag, attrs):
-        self.handle_starttag(tag, attrs)
-        self.handle_endtag(tag)
-
-    def handle_endtag(self, tag):
-        self.depth = max(0, self.depth - 1)
-        if self.row_depth is not None:
-            self.parts.append(f"</{tag.lower()}>")
-            if self.depth <= self.row_depth:
-                row = " ".join(self.parts)
-                if re.search(r"(?:\barabic\b|العربية|عربي)", row, re.I):
-                    self.rows.append(row)
-                self.row_depth = None
-                self.parts = []
-
-    def handle_data(self, data):
-        if self.row_depth is not None and data.strip():
-            self.parts.append(html_lib.escape(data.strip()))
-
-
-def _official_xbox_page(official_url):
-    if not isinstance(official_url, str) or "xbox.com" not in official_url.lower():
-        return ""
-    try:
-        response = SESSION.get(official_url, timeout=20)
-        response.raise_for_status()
-        return html_lib.unescape(response.text)
-    except Exception as error:
-        print("OFFICIAL XBOX PAGE FETCH FAILED:", repr(error))
-        return ""
-
-
-def _arabic_support_from_xbox_html(source):
-    """Return a result only when the Arabic row exposes recognizable status icons."""
-    if not source:
-        return None
-
-    parser = _XboxLanguageTableParser()
-    try:
-        parser.feed(source)
-    except Exception:
-        return None
-
-    rows = parser.rows
-    # Some Xbox page versions serialize their markup inside JSON instead of normal
-    # table elements. In that case, inspect a small window around the Arabic label.
-    if not rows:
-        decoded = html_lib.unescape(source)
-        for match in re.finditer(r"(?:\barabic\b|العربية|عربي)", decoded, re.I):
-            window = decoded[max(0, match.start() - 1800):match.end() + 1800]
-            if re.search(r"(?:aria-checked|data-checked|data-state|checkmark|checkbox|<svg|<path|<circle)", window, re.I):
-                rows.append(window)
-
-    if not rows:
-        return None
-
-    for row in rows:
-        # Explicit semantic states are the safest indicators.
-        if re.search(
-            r"(?:aria-checked=[\"']true|data-checked=[\"']true|"
-            r"data-state=[\"']checked|is-checked|checkbox-checked|"
-            r"icon-check|checkmark|aria-label=[\"'][^\"']*(?:checked|supported|selected)[^\"']*[\"'])",
-            row, re.I
-        ):
-            return True
-        if re.search(
-            r"(?:aria-checked=[\"']false|data-checked=[\"']false|"
-            r"data-state=[\"']unchecked|aria-label=[\"'][^\"']*(?:not checked|not supported|unchecked)[^\"']*[\"'])",
-            row, re.I
-        ):
-            return False
-
-        # The Xbox language matrix renders checked cells with a check glyph inside
-        # the circle; unchecked cells are empty circles. Count only when the row
-        # has the expected three language capability cells (audio/interface/subtitles).
-        circle_count = len(re.findall(r"<(?:circle|svg)\b", row, re.I))
-        check_glyph_count = len(re.findall(r"<(?:path|polyline)\b", row, re.I))
-        has_green_check = bool(re.search(
-            r"(?:#[0-9a-f]{3,8}\b|rgb\([^)]*\)|green)", row, re.I
-        )) and bool(re.search(r"(?:check|path|polyline|svg)", row, re.I))
-
-        if circle_count >= 3 and check_glyph_count == 0:
-            return False
-        if check_glyph_count > 0 and (circle_count >= 1 or has_green_check):
-            return True
-
-    return None
-
-
-def get_game_inspection(product, official_url=None):
-    """Return install size only; do not infer a size from unrelated numeric fields."""
-    # Microsoft has returned size metadata under different casing/names across
-    # catalog payload versions. Match only size-related installation/package
-    # fields, case-insensitively; do not treat arbitrary fields like image sizes
-    # or screen dimensions as a game's install size.
-    size_key_names = {
-        "installationsize", "installsize", "packagesize",
-        "approximatesize", "contentsize", "sizeondisk",
-        "installsizeinbytes", "installationsizeinbytes",
-        "approximatesizeinbytes", "packagesizeinbytes",
-        "contentsizeinbytes", "downloadsize", "downloadsizeinbytes",
-        "xboxinstallsize", "xboxinstallsizeinbytes",
-    }
-
-    def normalize_key(key):
-        return re.sub(r"[^a-z]", "", str(key).lower())
-
-    def collect_values(node, wanted_keys, found):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                normalized_key = normalize_key(key)
-                if normalized_key in wanted_keys and value not in (None, "", [], {}):
-                    found.append((value, str(key)))
-                collect_values(value, wanted_keys, found)
-        elif isinstance(node, list):
-            for value in node:
-                collect_values(value, wanted_keys, found)
-
-    def format_size(value, key_hint=""):
-        if isinstance(value, dict):
-            # Store metadata sometimes wraps the actual value in an object.
-            for key in ("Value", "Size", "value", "size", "Amount"):
-                if value.get(key) not in (None, "", [], {}):
-                    return format_size(value[key], key_hint or key)
-            return None
-
-        if isinstance(value, (int, float)):
-            if value <= 0:
-                return None
-            hint = key_hint.lower()
-            # Numeric byte values are converted only when the field name says bytes
-            # or the value is clearly expressed as bytes.
-            if "byte" in hint or value >= 1024 ** 3:
-                return f"{value / (1024 ** 3):.2f} GB"
-            if value >= 1024 ** 2:
-                return f"{value / (1024 ** 2):.0f} MB"
-            return None
-
-        if isinstance(value, str):
-            match = re.search(r"(?<![\w.])(\d+(?:[.,]\d+)?)\s*(GB|GiB|MB|MiB|TB|TiB)(?![a-z])", value.strip(), re.I)
-            if match:
-                number = float(match.group(1).replace(",", "."))
-                unit = match.group(2).upper()
-                factor = {"GB": 1, "GIB": 1.073741824, "MB": 1/1000,
-                          "MIB": 1/1024, "TB": 1000, "TIB": 1099.511627776}[unit]
-                return f"{number * factor:.2f} GB"
-            if value.strip().isdigit() and "byte" in key_hint.lower():
-                return format_size(int(value.strip()), key_hint)
-        return None
-
-    raw_sizes = []
-    collect_values(product, size_key_names, raw_sizes)
-    install_size = None
-    for raw_size, key_hint in raw_sizes:
-        install_size = format_size(raw_size, key_hint)
-        if install_size:
-            break
-
-    official_html = _official_xbox_page(official_url)
-    if not install_size and official_html:
-        # Search raw HTML/embedded JSON first, since the visible page is often hydrated by JS.
-        raw_patterns = (
-            r'(?i)(?:approximate\s*size|installation\s*size|install\s*size|size\s*on\s*disk|yaklaşık\s*boyut|yaklasik\s*boyut|yükleme\s*boyutu|yukleme\s*boyutu|kurulum\s*boyutu|الحجم\s*التقريبي|حجم\s*التثبيت)[^\w]{0,100}(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))',
-            r'(?i)(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))[^<>]{0,100}(?:approximate\s*size|installation\s*size|install\s*size|size\s*on\s*disk|yaklaşık\s*boyut|yaklasik\s*boyut|yükleme\s*boyutu|yukleme\s*boyutu|kurulum\s*boyutu|الحجم\s*التقريبي|حجم\s*التثبيت)',
-        )
-        for pattern in raw_patterns:
-            match = re.search(pattern, official_html)
-            if match:
-                install_size = format_size(match.group(1))
-                if install_size:
-                    break
-
-        if not install_size:
-            # Some Xbox page builds serialize the approximate size as a numeric
-            # byte count in JSON rather than displaying a localized label in HTML.
-            json_size_patterns = (
-                r'(?i)["\'](?:approximateSize|approximateSizeInBytes|installationSize|installationSizeInBytes|installSize|installSizeInBytes|downloadSize|downloadSizeInBytes|sizeOnDisk)["\']\s*:\s*["\']?(\d+(?:\.\d+)?)["\']?',
-            )
-            for pattern in json_size_patterns:
-                for match in re.finditer(pattern, official_html):
-                    try:
-                        numeric_size = float(match.group(1))
-                    except (TypeError, ValueError):
-                        continue
-                    if numeric_size >= 1024 ** 3:
-                        install_size = format_size(numeric_size, "InstallationSizeInBytes")
-                        if install_size:
-                            break
-                if install_size:
-                    break
-
-        if not install_size:
-            page_text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", official_html)
-            page_text = re.sub(r"(?s)<[^>]+>", " ", page_text)
-            page_text = re.sub(r"\s+", " ", html_lib.unescape(page_text))
-            text_patterns = (
-                r"(?:الحجم التقريبي|حجم التثبيت|حجم اللعبة|Yaklaşık boyut|Yaklasik boyut|Yükleme boyutu|Yukleme boyutu|Kurulum boyutu|Approximate size|Installation size|Install size|Size on disk)\s*[:：]?\s*(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))",
-                r"(\d+(?:[.,]\d+)?\s*(?:GB|GiB|MB|MiB|TB|TiB))\s*(?:الحجم التقريبي|حجم التثبيت|Approximate size|Installation size|Install size|Size on disk)",
-            )
-            for pattern in text_patterns:
-                match = re.search(pattern, page_text, re.I)
-                if match:
-                    install_size = format_size(match.group(1))
-                    if install_size:
-                        break
-
-    return {"install_size": install_size}
-
-
-# =========================================================
-# استخراج الأسعار
 # =========================================================
 
 def get_prices(product):
@@ -1522,6 +1268,35 @@ def save_last_request(
 
 
 # =========================================================
+# سجل آخر 10 عمليات بحث لكل مستخدم
+# =========================================================
+
+def save_recent_search(user_id, product_id, game_name, url, current_price):
+    connection = sqlite3.connect(DB_FILE)
+    connection.execute(
+        "INSERT INTO recent_searches (user_id, product_id, game_name, url, current_price) VALUES (?, ?, ?, ?, ?)",
+        (user_id, str(product_id), game_name, url, int(current_price))
+    )
+    # نحتفظ بآخر 10 عمليات فقط لكل مستخدم
+    connection.execute(
+        "DELETE FROM recent_searches WHERE user_id = ? AND id NOT IN (SELECT id FROM recent_searches WHERE user_id = ? ORDER BY searched_at DESC, id DESC LIMIT 10)",
+        (user_id, user_id)
+    )
+    connection.commit()
+    connection.close()
+
+
+def get_recent_searches(user_id, limit=10):
+    connection = sqlite3.connect(DB_FILE)
+    rows = connection.execute(
+        "SELECT product_id, game_name, url, current_price FROM recent_searches WHERE user_id = ? GROUP BY product_id ORDER BY MAX(searched_at) DESC, MAX(id) DESC LIMIT ?",
+        (user_id, limit)
+    ).fetchall()
+    connection.close()
+    return rows
+
+
+# =========================================================
 # آخر بحث
 # =========================================================
 
@@ -1911,19 +1686,23 @@ def get_game_keyboard(
     buttons = [
         [
             InlineKeyboardButton(
-                "🔍 فحص اللعبة قبل الشراء",
-                callback_data=f"inspect:{product_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
                 "🛒 اطلب الآن",
                 callback_data=f"order:{product_id}"
             )
         ],
         [
             InlineKeyboardButton(
-                "📋 نسخ السعر",
+                "🔄 تحديث السعر",
+                callback_data=f"refresh:{product_id}"
+            ),
+            InlineKeyboardButton(
+                "🕘 آخر عمليات البحث",
+                callback_data="recentlist"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📋 نسخ تفاصيل اللعبة",
                 callback_data=f"copy:{product_id}"
             ),
             InlineKeyboardButton(
@@ -2015,6 +1794,9 @@ def create_game_result(
         game_name,
         reference,
         store_price
+    )
+    save_recent_search(
+        user.id, product_id, game_name, reference, store_price
     )
 
     discount_percent = None
@@ -2109,48 +1891,6 @@ def create_game_result(
 
 
 # =========================================================
-# حاسبة الليرات التركية
-# =========================================================
-
-def parse_lira_amount(text):
-
-    value = str(text or "").strip().lower()
-    value = value.replace("ليرة", "")
-    value = value.replace("ليرات", "")
-    value = value.replace("try", "")
-    value = value.replace("tl", "")
-    value = value.replace("₺", "")
-    value = value.replace(",", ".")
-    value = value.strip()
-
-    try:
-        amount = float(value)
-    except Exception:
-        return None
-
-    if amount <= 0:
-        return None
-
-    return amount
-
-
-def calculator_result(amount):
-
-    price = calculate_price(amount)
-
-    if price % 1000 == 0:
-        price_text = f"{price // 1000} ألف"
-    else:
-        price_text = format_store_price(price)
-
-    return (
-        "💱 <b>حاسبة الليرات التركية</b>\n\n"
-        f"🇹🇷 <b>{amount:g} ليرة</b>\n"
-        f"🇮🇶 <b>{price_text}</b>"
-    )
-
-
-# =========================================================
 # START
 # =========================================================
 
@@ -2160,16 +1900,7 @@ async def start(
 ):
 
     if update.message:
-
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "💱 حاسبة الليرات",
-                    callback_data="calculator"
-                )
-            ]
-        ]
-
+        buttons = []
         if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
             buttons.append([
                 InlineKeyboardButton(
@@ -2178,14 +1909,11 @@ async def start(
                 )
             ])
 
-        keyboard = InlineKeyboardMarkup(buttons)
-
         await update.message.reply_text(
             "🎮 أرسل رابط لعبة من Xbox Store\n"
             "أو اكتب اسم اللعبة 🔍",
-            reply_markup=keyboard
+            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
         )
-
 
 # =========================================================
 # ID
@@ -2275,36 +2003,6 @@ async def handle_message(
         return
 
     text = update.message.text.strip()
-
-    # إذا المستخدم فتح الحاسبة، الرقم ينحسب مباشرة.
-    if context.user_data.get("calculator_mode"):
-
-        amount = parse_lira_amount(text)
-
-        if amount is not None:
-            context.user_data["calculator_mode"] = False
-
-            await update.message.reply_text(
-                calculator_result(amount),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "💱 حساب مبلغ آخر",
-                            callback_data="calculator"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "🏠 الرئيسية",
-                            callback_data="home"
-                        )
-                    ]
-                ])
-            )
-            return
-
-        context.user_data["calculator_mode"] = False
 
     if len(text) < 2:
         return
@@ -2753,28 +2451,48 @@ async def button_handler(
     user_id = user.id
 
     # =====================================================
-    # حاسبة الليرات التركية
+    # آخر عمليات البحث
     # =====================================================
-
-    if data == "calculator":
-
+    if data == "recentlist":
+        rows = get_recent_searches(user_id, 10)
+        if not rows:
+            await query.answer("ما عندك عمليات بحث سابقة", show_alert=True)
+            return
+        buttons = []
+        for product_id, game_name, url, price in rows:
+            buttons.append([InlineKeyboardButton(
+                f"🎮 {game_name[:38]} — {format_store_price(price)}",
+                callback_data=f"recent:{product_id}"
+            )])
+        buttons.append([InlineKeyboardButton("🏠 رجوع", callback_data="recentback")])
         await query.answer()
-        context.user_data["calculator_mode"] = True
-
         await query.edit_message_text(
-            "💱 <b>حاسبة الليرات التركية</b>\n\n"
-            "أرسل المبلغ بالليرة التركية فقط.\n"
-            "مثال: <code>500</code>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🏠 الرئيسية",
-                        callback_data="adminhome"
-                    )
-                ]
-            ])
+            "🕘 <b>آخر 10 ألعاب بحثت عنها:</b>\n\nاختار لعبة لعرض سعرها من جديد.",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
         )
+        return
+
+    if data == "recentback":
+        await query.answer("اكتب اسم اللعبة للبحث عنها")
+        return
+
+    if data.startswith("recent:") or data.startswith("refresh:"):
+        product_id = data.split(":", 1)[1]
+        is_refresh = data.startswith("refresh:")
+        try:
+            info = await asyncio.to_thread(get_game_info_by_product_id, product_id)
+            refreshed_id, game_name, turkey_price, original_price, end_date = info
+            last = get_last_request(user_id, refreshed_id)
+            url = last[1] if last else f"https://www.xbox.com/tr-TR/games/store/{refreshed_id}"
+            message, keyboard = create_game_result(
+                update, refreshed_id, game_name, turkey_price, original_price,
+                end_date, url
+            )
+            await query.answer("✅ تم تحديث السعر" if is_refresh else "✅ تم فتح اللعبة")
+            await query.edit_message_text(message, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as error:
+            print("REFRESH/RECENT ERROR:", repr(error))
+            await query.answer("❌ ماكدرت أجيب السعر حاليًا، جرّب بعدين", show_alert=True)
         return
 
     # =====================================================
@@ -2845,19 +2563,9 @@ async def button_handler(
     # =====================================================
 
     if data == "home":
-
-        context.user_data["calculator_mode"] = False
         await query.answer()
 
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "💱 حاسبة الليرات",
-                    callback_data="calculator"
-                )
-            ]
-        ]
-
+        buttons = []
         if ADMIN_CHAT_ID and str(user_id) == str(ADMIN_CHAT_ID):
             buttons.append([
                 InlineKeyboardButton(
@@ -2871,7 +2579,7 @@ async def button_handler(
             "أرسل رابط لعبة من Xbox Store\n"
             "أو اكتب اسم اللعبة 🔍",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
         )
         return
 
@@ -2895,12 +2603,6 @@ async def button_handler(
             "أو اكتب اسم اللعبة 🔍",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "💱 حاسبة الليرات",
-                        callback_data="calculator"
-                    )
-                ],
                 [
                     InlineKeyboardButton(
                         "🧾 سجل الطلبات",
@@ -3050,82 +2752,6 @@ async def button_handler(
         return
 
     # =====================================================
-    # فاحص اللعبة قبل الشراء
-    # =====================================================
-    # فاحص اللعبة قبل الشراء - العربية والحجم فقط
-    # =====================================================
-
-    if data.startswith("inspect:"):
-        product_id = data.split(":", 1)[1].upper()
-        last_request = get_last_request(user_id, product_id)
-
-        if not last_request:
-            await query.answer(
-                "❌ معلومات اللعبة غير متوفرة، ابحث عنها مرة ثانية.",
-                show_alert=True
-            )
-            return
-
-        game_name, game_url, current_price = last_request
-        await query.answer("🔍 جاري فحص حجم اللعبة...")
-
-        try:
-            product = await asyncio.to_thread(
-                get_arabic_inspection_product, product_id
-            )
-            details = get_game_inspection(product, game_url)
-
-            size_text = details["install_size"] or "غير متوفر ضمن بيانات المتجر أو الصفحة الرسمية"
-
-            report = (
-                "🔍 فحص حجم اللعبة\n"
-                "━━━━━━━━━━━━━━\n"
-                f"💾 حجم اللعبة: {size_text}"
-            )
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🛒 اطلب اللعبة", callback_data=f"order:{product_id}")],
-                [InlineKeyboardButton("🔙 الرجوع للسعر", callback_data=f"inspectback:{product_id}")]
-            ])
-            await query.message.reply_text(
-                report,
-                reply_markup=keyboard
-            )
-        except Exception as error:
-            print("GAME INSPECTION ERROR:", product_id, repr(error))
-            await query.message.reply_text(
-                "❌ ما كدرت أجيب معلومات اللغة والحجم حالياً. جرّب مرة ثانية لاحقاً.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 إعادة الفحص", callback_data=f"inspect:{product_id}")]
-                ])
-            )
-        return
-
-    if data.startswith("inspectback:"):
-        product_id = data.split(":", 1)[1].upper()
-        last_request = get_last_request(user_id, product_id)
-        if not last_request:
-            await query.answer("ابحث عن اللعبة مرة ثانية", show_alert=True)
-            return
-        game_name, reference, current_price = last_request
-        try:
-            if reference.startswith("xboxid:"):
-                info = await asyncio.to_thread(get_game_info_by_product_id, product_id)
-            else:
-                info = await asyncio.to_thread(get_game_info, reference)
-            resolved_id, resolved_name, turkey_price, original_price, end_date = info
-            message, keyboard = create_game_result(
-                query, resolved_id, resolved_name, turkey_price, original_price,
-                end_date, reference, show_back=user_id in SEARCH_SELECTIONS
-            )
-            await query.answer()
-            await query.message.reply_text(message, parse_mode="HTML", reply_markup=keyboard)
-        except Exception as error:
-            print("INSPECTION BACK ERROR:", product_id, repr(error))
-            await query.answer("تعذر تحديث السعر حالياً", show_alert=True)
-        return
-
-    # =====================================================
     # نسخ السعر / معلومات اللعبة
     # =====================================================
 
@@ -3145,7 +2771,8 @@ async def button_handler(
 
         copy_text = (
             f"🎮 {game_name}\n"
-            f"💰 السعر: {format_store_price(current_price)} 🇮🇶"
+            f"💰 السعر: {format_store_price(current_price)} 🇮🇶\n"
+            f"🔗 رابط اللعبة: {url}"
         )
 
         try:
