@@ -38,6 +38,36 @@ if ADMIN_CHAT_ID.lstrip("-").isdigit():
 ORDER_URL = "https://t.me/Sijadsa"
 DB_FILE = "price_alerts.db"
 
+# منتجات الاشتراكات المعروضة داخل البوت
+GAME_PASS_PRODUCTS = {
+    "ultimate": {
+        "title": "🎮 Xbox Game Pass Ultimate XBOX",
+        "sections": [("🆕 حساب جديد", [
+            ("شهرين", "23,000 ألف"), ("70 يوم", "25,000 ألف"),
+            ("3 أشهر", "37,000 ألف"), ("4 أشهر", "45,000 ألف"),
+            ("6 أشهر", "65,000 ألف"), ("8 أشهر", "82,000 ألف"),
+            ("10 أشهر", "105,000 ألف"), ("12 شهر", "125,000 ألف"),
+        ])],
+    },
+    "pc": {
+        "title": "🎮 Game Pass PC",
+        "sections": [
+            ("🆕 حساب جديد", [
+                ("14 يوم", "5,000 ألف"), ("شهر", "13,000 ألف"),
+                ("3 أشهر", "25,000 ألف"), ("4 أشهر", "27,000 ألف"),
+            ]),
+            ("🔄 تجديد Game Pass", [("3 أشهر", "25,000 ألف")]),
+        ],
+    },
+    "core": {
+        "title": "🎮 Xbox Game Pass Core XBOX",
+        "sections": [("🆕 حساب جديد", [
+            ("شهر", "12,000 ألف"), ("6 أشهر", "32,000 ألف"),
+            ("12 شهر", "60,000 ألف"),
+        ])],
+    },
+}
+
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN غير موجود في Variables")
 
@@ -1900,7 +1930,7 @@ async def start(
 ):
 
     if update.message:
-        buttons = []
+        buttons = [[InlineKeyboardButton("🛒 اشتراكات Game Pass", callback_data="gpass_menu")]]
         if ADMIN_CHAT_ID and str(update.effective_user.id) == str(ADMIN_CHAT_ID):
             buttons.append([
                 InlineKeyboardButton(
@@ -1910,9 +1940,10 @@ async def start(
             ])
 
         await update.message.reply_text(
-            "🎮 أرسل رابط لعبة من Xbox Store\n"
-            "أو اكتب اسم اللعبة 🔍",
-            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
+            "🎮 أهلاً بيك في SA STORE\n\n"
+            "🔍 أرسل اسم لعبة أو رابطها من Xbox Store للبحث عن السعر.\n"
+            "🛒 أو اختار اشتراكات Game Pass من الزر أدناه.",
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
 
 # =========================================================
@@ -2449,6 +2480,45 @@ async def button_handler(
 
     user = query.from_user
     user_id = user.id
+
+    # =====================================================
+    # متجر اشتراكات Game Pass
+    # =====================================================
+    if data == "gpass_menu":
+        buttons = [
+            [InlineKeyboardButton("🎮 Game Pass Ultimate XBOX", callback_data="gpass:ultimate")],
+            [InlineKeyboardButton("💻 Game Pass PC", callback_data="gpass:pc")],
+            [InlineKeyboardButton("🎮 Game Pass Core XBOX", callback_data="gpass:core")],
+        ]
+        await query.answer()
+        await query.edit_message_text(
+            "🛒 <b>اشتراكات Game Pass</b>\n\nاختار الاشتراك اللي تريده:",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    if data.startswith("gpass:"):
+        key = data.split(":", 1)[1]
+        product = GAME_PASS_PRODUCTS.get(key)
+        if not product:
+            await query.answer("المنتج غير متوفر", show_alert=True)
+            return
+        lines = [f"<b>{product['title']}</b>", ""]
+        for section_title, prices in product["sections"]:
+            lines.append(f"<b>{section_title}</b>")
+            for duration, price in prices:
+                lines.append(f"▫️ {duration} — {price}")
+            lines.append("")
+        buttons = [
+            [InlineKeyboardButton("🛒 اطلب الآن", url=ORDER_URL)],
+            [InlineKeyboardButton("⬅️ رجوع للاشتراكات", callback_data="gpass_menu")],
+        ]
+        await query.answer()
+        await query.edit_message_text(
+            "\n".join(lines).strip(), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
 
     # =====================================================
     # آخر عمليات البحث
